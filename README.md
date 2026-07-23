@@ -85,7 +85,7 @@ flag; `https://` enables it. Cookies are always `HttpOnly` and
 
 ## Key accounts on `(iss, sub)`, never on email
 
-The pair (issuer, `sub`) is the **only** identifier an app may use as
+The pair (`iss`, `sub`) is the **only** identifier an app may use as
 an account key — `sub` is unique and never reassigned *within* an
 issuer, and means nothing outside it. `User.Issuer` carries the
 verified `iss` so apps can store the pair. Store email *alongside* it
