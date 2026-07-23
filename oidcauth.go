@@ -292,7 +292,16 @@ func parseRedirectURL(raw string) (callbackPath string, secure bool, err error) 
 	if u.Path == "" || u.Path == "/" {
 		return "", false, fmt.Errorf("oidcauth: redirect URL %q needs a non-root path (e.g. /auth/callback)", raw)
 	}
-	return path.Clean(u.Path), u.Scheme == "https", nil
+	// The handler mounts at this path, but the issuer gets the raw
+	// cfg.RedirectURL as redirect_uri. Cleaning a non-canonical path
+	// here (trailing slash, //, ..) would desync the two: the issuer
+	// would redirect to the raw path while the handler sits at the
+	// cleaned one, and the callback would silently never fire. Reject
+	// instead, consistent with the query/fragment/root checks above.
+	if clean := path.Clean(u.Path); clean != u.Path {
+		return "", false, fmt.Errorf("oidcauth: redirect URL %q has a non-canonical path; use %q", raw, clean)
+	}
+	return u.Path, u.Scheme == "https", nil
 }
 
 // LoginPath returns where [Auth.LoginHandler] expects to be mounted.

@@ -350,7 +350,7 @@ func TestLogoutClearsSession(t *testing.T) {
 	a := newTestAuth(t, idp)
 
 	rr := httptest.NewRecorder()
-	a.LogoutHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/auth/logout", nil))
+	a.LogoutHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/auth/logout", nil))
 	if rr.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302", rr.Code)
 	}
@@ -362,6 +362,24 @@ func TestLogoutClearsSession(t *testing.T) {
 	}
 	if !cleared {
 		t.Errorf("logout did not clear the session cookie")
+	}
+}
+
+// TestLogoutRejectsGET pins logout as POST-only: a GET-triggered logout
+// is CSRF-able, so it must not clear the session.
+func TestLogoutRejectsGET(t *testing.T) {
+	idp := newFakeIDP(t)
+	a := newTestAuth(t, idp)
+
+	rr := httptest.NewRecorder()
+	a.LogoutHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/auth/logout", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rr.Code)
+	}
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == a.sessionCookieName && c.MaxAge < 0 {
+			t.Errorf("GET logout cleared the session cookie")
+		}
 	}
 }
 

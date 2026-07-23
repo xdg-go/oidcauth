@@ -60,6 +60,8 @@ flag; `https://` enables it. Cookies are always `HttpOnly` and
   nonce, then sets the session cookie.
 - `LogoutHandler` — clears the app session cookie only. The issuer's
   session and any upstream (e.g. Google) consent are untouched.
+  POST-only, to prevent CSRF-forced logout; drive it from a form or a
+  `fetch` POST, not a link.
 - `RequireAuth` middleware + `UserFromContext` — gate handlers and
   read the verified `sub`, `email`, `email_verified`, `name`.
 - `Auth.User(r)` — optional-auth check for public pages (login vs

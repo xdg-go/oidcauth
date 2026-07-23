@@ -140,9 +140,14 @@ func (a *Auth) CallbackHandler() http.Handler {
 // LogoutHandler clears the app session cookie and redirects. It only
 // ends the app's session: the issuer's own session and any upstream
 // (e.g. Google) consent are unaffected.
+//
+// Logout is POST-only. A GET-triggered logout is CSRF-able: any
+// cross-site <img> or <a> pointing at the logout path would force a
+// victim's session to end, and SameSite=Lax does not stop top-level
+// GET navigation. Log out from a form (or fetch) that issues a POST.
 func (a *Auth) LogoutHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}

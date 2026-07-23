@@ -187,6 +187,11 @@ func TestParseRedirectURL(t *testing.T) {
 		{in: "ftp://app.example.com/cb", wantErr: true},
 		{in: "/auth/callback", wantErr: true},
 		{in: "https://app.example.com/cb?x=1", wantErr: true},
+		// Non-canonical paths must be rejected, not silently cleaned:
+		// cleaning would desync the mount path from the redirect_uri.
+		{in: "https://app.example.com/auth/callback/", wantErr: true},
+		{in: "https://app.example.com/auth//callback", wantErr: true},
+		{in: "https://app.example.com/auth/../auth/callback", wantErr: true},
 	}
 	for _, c := range cases {
 		p, secure, err := parseRedirectURL(c.in)
