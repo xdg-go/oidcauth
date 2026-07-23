@@ -158,10 +158,15 @@ func (a *Auth) CallbackHandler() http.Handler {
 // ends the app's session: the issuer's own session and any upstream
 // (e.g. Google) consent are unaffected.
 //
-// Logout is POST-only. A GET-triggered logout is CSRF-able: any
-// cross-site <img> or <a> pointing at the logout path would force a
-// victim's session to end, and SameSite=Lax does not stop top-level
-// GET navigation. Log out from a form (or fetch) that issues a POST.
+// Logout is POST-only, for two reasons. CSRF: with SameSite=Lax,
+// cross-site subresources (<img>, script) never carry the session
+// cookie, but top-level GET navigation does — so a GET logout is
+// forceable by any cross-site link, while Lax withholds cookies from
+// cross-site POSTs, making POST + Lax a complete defense with no CSRF
+// token. Accidents: link prefetchers, browser prerendering, and email
+// scanners issue GETs and would randomly end sessions; nothing
+// prefetches a form. Log out from a form (or fetch) that issues a
+// POST.
 func (a *Auth) LogoutHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
