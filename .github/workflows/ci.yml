@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -race ./...
+      - run: go vet ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+
+  secret-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No committed key material or .env files, ever.
+      - run: |
+          ! git grep -nE -- '-----BEGIN( RSA| EC| OPENSSH)? PRIVATE KEY|AKIA[0-9A-Z]{16}' || {
+            echo "::error::key material found in tracked files"; exit 1; }
+          ! git ls-files | grep -E '(^|/)\.env(\..+)?$' | grep -v '\.env\.example$' || {
+            echo "::error::.env file committed"; exit 1; }
