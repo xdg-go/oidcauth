@@ -193,6 +193,8 @@ func TestParseRedirectURL(t *testing.T) {
 		{in: "https://app.example.com/auth/callback/", wantErr: true},
 		{in: "https://app.example.com/auth//callback", wantErr: true},
 		{in: "https://app.example.com/auth/../auth/callback", wantErr: true},
+		// A control character makes url.Parse itself fail.
+		{in: "https://app.example.com/cb\x7f", wantErr: true},
 	}
 	for _, c := range cases {
 		p, secure, err := parseRedirectURL(c.in)

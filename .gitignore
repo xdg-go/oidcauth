@@ -3,3 +3,4 @@ go.work.sum
 .env
 *.env
 coverage.out
+coverage.html

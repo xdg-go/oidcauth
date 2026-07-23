@@ -278,6 +278,104 @@ func TestCallbackReportsIdPError(t *testing.T) {
 	}
 }
 
+// TestLoginRejectsPOST pins LoginHandler as safe-method-only: the login
+// redirect is a navigation, not a state change.
+func TestLoginRejectsPOST(t *testing.T) {
+	idp := newFakeIDP(t)
+	a := newTestAuth(t, idp)
+
+	rr := httptest.NewRecorder()
+	a.LoginHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/auth/login", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", rr.Code)
+	}
+}
+
+// TestCallbackRejectsPOST pins the callback as GET-only: it is the target
+// of the issuer's browser redirect.
+func TestCallbackRejectsPOST(t *testing.T) {
+	idp := newFakeIDP(t)
+	a := newTestAuth(t, idp)
+
+	rr := httptest.NewRecorder()
+	a.CallbackHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/auth/callback", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", rr.Code)
+	}
+}
+
+// TestCallbackRejectsMissingCode covers a callback whose state matches but
+// that carries no authorization code.
+func TestCallbackRejectsMissingCode(t *testing.T) {
+	idp := newFakeIDP(t)
+	a := newTestAuth(t, idp)
+
+	authURL, stateCookie := startLogin(t, a, "/auth/login")
+	cb := "/auth/callback?" + url.Values{"state": {authURL.Query().Get("state")}}.Encode()
+	req := httptest.NewRequest(http.MethodGet, cb, nil)
+	req.AddCookie(stateCookie)
+	rr := httptest.NewRecorder()
+	a.CallbackHandler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+	if sessionCookie(t, a, rr) != nil {
+		t.Errorf("session cookie set despite missing code")
+	}
+}
+
+// TestCallbackReportsExchangeFailure covers a failed token exchange: a
+// broken issuer surfaces as 502, not a 5xx panic or a session.
+func TestCallbackReportsExchangeFailure(t *testing.T) {
+	idp := newFakeIDP(t)
+	a := newTestAuth(t, idp)
+	idp.tokenStatus = http.StatusInternalServerError
+
+	authURL, stateCookie := startLogin(t, a, "/auth/login")
+	rr := finishLogin(t, a, idp, authURL, stateCookie)
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("status = %d (%s), want 502", rr.Code, rr.Body.String())
+	}
+	if sessionCookie(t, a, rr) != nil {
+		t.Errorf("session cookie set despite exchange failure")
+	}
+}
+
+// TestCallbackRejectsMissingIDToken covers a token response with no
+// id_token: an OAuth2 success that is an OIDC failure.
+func TestCallbackRejectsMissingIDToken(t *testing.T) {
+	idp := newFakeIDP(t)
+	a := newTestAuth(t, idp)
+	idp.omitIDToken = true
+
+	authURL, stateCookie := startLogin(t, a, "/auth/login")
+	rr := finishLogin(t, a, idp, authURL, stateCookie)
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("status = %d (%s), want 502", rr.Code, rr.Body.String())
+	}
+	if sessionCookie(t, a, rr) != nil {
+		t.Errorf("session cookie set despite missing id_token")
+	}
+}
+
+// TestCallbackRejectsUnreadableClaims covers a verified token whose typed
+// claims have the wrong JSON shape (email as a number). Verification
+// passes; claim extraction fails.
+func TestCallbackRejectsUnreadableClaims(t *testing.T) {
+	idp := newFakeIDP(t)
+	a := newTestAuth(t, idp)
+	idp.claims["email"] = 123 // number where a string is expected
+
+	authURL, stateCookie := startLogin(t, a, "/auth/login")
+	rr := finishLogin(t, a, idp, authURL, stateCookie)
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("status = %d (%s), want 502", rr.Code, rr.Body.String())
+	}
+	if sessionCookie(t, a, rr) != nil {
+		t.Errorf("session cookie set despite unreadable claims")
+	}
+}
+
 func TestForceApprovalIfNewUser(t *testing.T) {
 	idp := newFakeIDP(t)
 	known := map[string]bool{}

@@ -32,6 +32,14 @@ type fakeIDP struct {
 	// lastTokenForm records the most recent token-endpoint request
 	// form, e.g. to assert the PKCE code_verifier was sent.
 	lastTokenForm url.Values
+
+	// tokenStatus, when non-zero, makes the token endpoint respond with
+	// that HTTP status instead of a token, simulating an exchange failure.
+	tokenStatus int
+
+	// omitIDToken, when true, makes the token endpoint return a
+	// successful response with no id_token, simulating a broken issuer.
+	omitIDToken bool
 }
 
 func newFakeIDP(t *testing.T) *fakeIDP {
@@ -69,12 +77,19 @@ func newFakeIDP(t *testing.T) *fakeIDP {
 			return
 		}
 		idp.lastTokenForm = r.Form
-		writeJSON(w, map[string]any{
+		if idp.tokenStatus != 0 {
+			http.Error(w, "token endpoint failure", idp.tokenStatus)
+			return
+		}
+		resp := map[string]any{
 			"access_token": "test-access-token",
 			"token_type":   "bearer",
 			"expires_in":   300,
-			"id_token":     idp.mintIDToken(),
-		})
+		}
+		if !idp.omitIDToken {
+			resp["id_token"] = idp.mintIDToken()
+		}
+		writeJSON(w, resp)
 	})
 
 	idp.srv = httptest.NewServer(mux)
