@@ -17,8 +17,13 @@ import (
 //
 // Query parameters:
 //   - next: relative path to return to after login (default "/").
-//   - force: "1" requests a forced consent prompt (used internally by
-//     the [ForceApprovalIfNewUser] restart).
+//   - consent_restart: "1" marks this login as the one-time
+//     forced-consent restart that [ForceApprovalIfNewUser] triggers
+//     from the callback: the auth URL gains the force-consent
+//     parameters, and the flag is carried in the signed state cookie
+//     so the callback completes instead of restarting again. Anyone
+//     can forge a link with this parameter, but harmlessly so — the
+//     worst outcome is an unnecessary consent screen.
 func (a *Auth) LoginHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -26,11 +31,11 @@ func (a *Auth) LoginHandler() http.Handler {
 			return
 		}
 		st := statePayload{
-			State:    randomToken(),
-			Nonce:    randomToken(),
-			Verifier: oauth2.GenerateVerifier(),
-			Next:     sanitizeNext(r.URL.Query().Get("next")),
-			Forced:   r.URL.Query().Get("force") == "1",
+			State:          randomToken(),
+			Nonce:          randomToken(),
+			Verifier:       oauth2.GenerateVerifier(),
+			Next:           sanitizeNext(r.URL.Query().Get("next")),
+			ConsentRestart: r.URL.Query().Get("consent_restart") == "1",
 		}
 		a.setStateCookie(w, st)
 
@@ -38,7 +43,7 @@ func (a *Auth) LoginHandler() http.Handler {
 			oidc.Nonce(st.Nonce),
 			oauth2.S256ChallengeOption(st.Verifier),
 		}
-		if st.Forced {
+		if st.ConsentRestart {
 			for k, v := range a.forceConsentParams {
 				opts = append(opts, oauth2.SetAuthURLParam(k, v))
 			}
@@ -138,10 +143,17 @@ func (a *Auth) CallbackHandler() http.Handler {
 		}
 
 		// First visit from an unfamiliar sub: restart the auth request
-		// once with a forced consent prompt. st.Forced guards against
-		// looping when the app has not yet recorded the sub.
-		if a.knownSub != nil && !st.Forced && !a.knownSub(user.Sub) {
-			v := url.Values{"force": {"1"}}
+		// once with a forced consent prompt. The one-shot guard is
+		// st.ConsentRestart, not the app's user records: the flag rides
+		// in the signed state cookie through the second round-trip, so
+		// the restarted attempt falls through to the session below even
+		// though knownSub still reports the sub as unknown — recording
+		// the sub is app code's job, done after the session exists. An
+		// app that never records subs therefore gets one consent prompt
+		// per login, never a redirect loop. The ID token verified above
+		// is discarded; the restart is a full fresh auth request.
+		if a.knownSub != nil && !st.ConsentRestart && !a.knownSub(user.Sub) {
+			v := url.Values{"consent_restart": {"1"}}
 			if st.Next != "/" {
 				v.Set("next", st.Next)
 			}

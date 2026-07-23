@@ -78,13 +78,10 @@ flag; `https://` enables it. Cookies are always `HttpOnly` and
 - `ForceApprovalIfNewUser(func(sub string) bool)` — when the callback
   sees a `sub` your app has not recorded, the auth request restarts
   once with a forced consent prompt, so each user gets an explicit
-  consent screen exactly once per app. The restart sends both the
-  standard OIDC `prompt=consent` and the pre-OIDC
-  `approval_prompt=force`; conformant issuers ignore whichever they
-  don't recognize (RFC 6749 §3.1), so this works issuer-neutrally
-  without configuration. For an issuer that rejects the combination
-  (e.g. Google used directly), `WithForceConsentParams` overrides the
-  parameters.
+  consent screen exactly once per app. The default prompt parameters
+  are issuer-neutral; for an issuer that rejects them (e.g. Google
+  used directly), `WithForceConsentParams` overrides them — see its
+  doc comment.
 
 ## Key accounts on `(iss, sub)`, never on email
 

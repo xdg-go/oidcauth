@@ -283,8 +283,8 @@ func TestForceApprovalIfNewUser(t *testing.T) {
 	known := map[string]bool{}
 	a := newTestAuth(t, idp, ForceApprovalIfNewUser(func(sub string) bool { return known[sub] }))
 
-	// Unknown sub: the callback restarts login with force=1 instead of
-	// creating a session.
+	// Unknown sub: the callback restarts login with consent_restart=1
+	// instead of creating a session.
 	authURL, stateCookie := startLogin(t, a, "/auth/login?next=/private")
 	rr := finishLogin(t, a, idp, authURL, stateCookie)
 	if rr.Code != http.StatusFound {
@@ -294,8 +294,8 @@ func TestForceApprovalIfNewUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loc.Path != a.loginPath || loc.Query().Get("force") != "1" {
-		t.Fatalf("redirect = %q, want %s?force=1", loc, a.loginPath)
+	if loc.Path != a.loginPath || loc.Query().Get("consent_restart") != "1" {
+		t.Fatalf("redirect = %q, want %s?consent_restart=1", loc, a.loginPath)
 	}
 	if loc.Query().Get("next") != "/private" {
 		t.Errorf("restart lost next: %q", loc)
@@ -316,7 +316,7 @@ func TestForceApprovalIfNewUser(t *testing.T) {
 	}
 
 	// Second callback: sub is still unknown (the app records it only
-	// after login), but the Forced flag must prevent a loop.
+	// after login), but the ConsentRestart flag must prevent a loop.
 	delete(idp.claims, "nonce")
 	rr2 := finishLogin(t, a, idp, authURL2, stateCookie2)
 	if rr2.Code != http.StatusFound {
@@ -338,7 +338,7 @@ func TestWithForceConsentParams(t *testing.T) {
 		ForceApprovalIfNewUser(func(string) bool { return false }),
 		WithForceConsentParams(map[string]string{"prompt": "consent"}))
 
-	authURL, _ := startLogin(t, a, "/auth/login?force=1")
+	authURL, _ := startLogin(t, a, "/auth/login?consent_restart=1")
 	if got := authURL.Query().Get("prompt"); got != "consent" {
 		t.Errorf("prompt = %q, want consent", got)
 	}

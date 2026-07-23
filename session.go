@@ -39,12 +39,12 @@ type sessionPayload struct {
 // statePayload is the signed content of the transient login-state
 // cookie that binds one auth request to the browser that started it.
 type statePayload struct {
-	State    string    `json:"state"`
-	Nonce    string    `json:"nonce"`
-	Verifier string    `json:"verifier"` // PKCE code verifier
-	Next     string    `json:"next"`     // post-login redirect (relative)
-	Forced   bool      `json:"forced"`   // consent already forced once
-	Expiry   time.Time `json:"exp"`
+	State          string    `json:"state"`
+	Nonce          string    `json:"nonce"`
+	Verifier       string    `json:"verifier"`        // PKCE code verifier
+	Next           string    `json:"next"`            // post-login redirect (relative)
+	ConsentRestart bool      `json:"consent_restart"` // this attempt is the one-time forced-consent restart
+	Expiry         time.Time `json:"exp"`
 }
 
 func (a *Auth) sign(purpose string, payload []byte) string {
