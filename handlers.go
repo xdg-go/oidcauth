@@ -2,6 +2,7 @@ package oidcauth
 
 import (
 	"crypto/subtle"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"strings"
@@ -114,10 +115,26 @@ func (a *Auth) CallbackHandler() http.Handler {
 			return
 		}
 		user := User{
+			Issuer:        idToken.Issuer,
 			Sub:           idToken.Subject,
 			Email:         claims.Email,
 			EmailVerified: claims.EmailVerified,
 			Name:          claims.Name,
+		}
+		if len(a.extraClaims) > 0 {
+			var all map[string]json.RawMessage
+			if err := idToken.Claims(&all); err != nil {
+				http.Error(w, "unreadable id token claims", http.StatusBadGateway)
+				return
+			}
+			for _, name := range a.extraClaims {
+				if raw, ok := all[name]; ok {
+					if user.Extra == nil {
+						user.Extra = make(map[string]json.RawMessage, len(a.extraClaims))
+					}
+					user.Extra[name] = raw
+				}
+			}
 		}
 
 		// First visit from an unfamiliar sub: restart the auth request
@@ -154,6 +171,15 @@ func (a *Auth) LogoutHandler() http.Handler {
 		a.clearSessionCookie(w)
 		http.Redirect(w, r, a.postLogoutRedirect, http.StatusFound)
 	})
+}
+
+// ClearSession removes the app session cookie without redirecting.
+// Use it inside app handlers that end the session as part of their own
+// flow — e.g. account deletion — where redirecting the in-flight POST
+// to the POST-only logout endpoint is not possible. It only ends the
+// app's session, exactly like LogoutHandler.
+func (a *Auth) ClearSession(w http.ResponseWriter) {
+	a.clearSessionCookie(w)
 }
 
 // sanitizeNext restricts post-login redirects to same-origin relative

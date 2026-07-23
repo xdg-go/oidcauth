@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -172,8 +174,8 @@ func TestCallbackHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session unreadable: %v", err)
 	}
-	want := User{Sub: "test-sub-1", Email: "user@example.com", EmailVerified: true, Name: "Test User"}
-	if u != want {
+	want := User{Issuer: idp.srv.URL, Sub: "test-sub-1", Email: "user@example.com", EmailVerified: true, Name: "Test User"}
+	if !reflect.DeepEqual(u, want) {
 		t.Errorf("session user = %+v, want %+v", u, want)
 	}
 
@@ -380,6 +382,60 @@ func TestLogoutRejectsGET(t *testing.T) {
 		if c.Name == a.sessionCookieName && c.MaxAge < 0 {
 			t.Errorf("GET logout cleared the session cookie")
 		}
+	}
+}
+
+// TestClearSession covers the in-handler alternative to POST-only
+// logout (e.g. account deletion flows).
+func TestClearSession(t *testing.T) {
+	idp := newFakeIDP(t)
+	a := newTestAuth(t, idp)
+
+	rr := httptest.NewRecorder()
+	a.ClearSession(rr)
+	cleared := false
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == a.sessionCookieName && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Errorf("ClearSession did not clear the session cookie")
+	}
+}
+
+// TestWithExtraClaims verifies that named claims survive into the
+// session raw, and that absent claims are simply omitted.
+func TestWithExtraClaims(t *testing.T) {
+	idp := newFakeIDP(t)
+	a := newTestAuth(t, idp, WithExtraClaims("groups", "not_in_token"))
+	idp.claims["groups"] = []string{"admins", "users"}
+
+	authURL, stateCookie := startLogin(t, a, "/auth/login")
+	rr := finishLogin(t, a, idp, authURL, stateCookie)
+	if rr.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, want 302", rr.Code)
+	}
+	sc := sessionCookie(t, a, rr)
+	if sc == nil {
+		t.Fatalf("callback set no session cookie")
+	}
+	u, err := a.sessionUser(requestWithCookie(sc))
+	if err != nil {
+		t.Fatalf("session unreadable: %v", err)
+	}
+	var groups []string
+	if err := json.Unmarshal(u.Extra["groups"], &groups); err != nil {
+		t.Fatalf("Extra[groups] = %s: %v", u.Extra["groups"], err)
+	}
+	if !reflect.DeepEqual(groups, []string{"admins", "users"}) {
+		t.Errorf("groups = %v", groups)
+	}
+	if _, ok := u.Extra["not_in_token"]; ok {
+		t.Errorf("absent claim must not appear in Extra")
+	}
+	if u.Issuer != idp.srv.URL {
+		t.Errorf("Issuer = %q, want %q", u.Issuer, idp.srv.URL)
 	}
 }
 

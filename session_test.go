@@ -3,6 +3,7 @@ package oidcauth
 import (
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +47,7 @@ func TestSessionCookieRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sessionUser: %v", err)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
 }

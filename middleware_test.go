@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -71,7 +72,7 @@ func TestRequireAuthPassesValidSession(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("context user = %+v, want %+v", got, want)
 	}
 }
@@ -105,7 +106,7 @@ func TestUserHelperOnPublicPage(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(c)
-	if got, ok := a.User(req); !ok || got != want {
+	if got, ok := a.User(req); !ok || !reflect.DeepEqual(got, want) {
 		t.Errorf("User = (%+v, %v), want (%+v, true)", got, ok, want)
 	}
 }

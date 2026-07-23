@@ -17,6 +17,7 @@ package oidcauth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -24,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -87,13 +89,21 @@ func FromEnv() (Config, error) {
 
 // User holds the verified identity claims stored in the app session.
 type User struct {
+	// Issuer is the verified `iss` of the ID token. Together with Sub
+	// it forms the account key: sub is unique only within an issuer.
+	Issuer string `json:"iss"`
 	// Sub is the issuer-unique, never-reassigned user identifier.
-	// It is the ONLY claim apps may key accounts on.
+	// (Issuer, Sub) is the ONLY pair apps may key accounts on.
 	Sub string `json:"sub"`
-	// Email is for display and migration only — never an account key.
+	// Email is for display and recovery only — never an account key,
+	// and never a basis for automatically linking accounts.
 	Email         string `json:"email"`
 	EmailVerified bool   `json:"email_verified"`
 	Name          string `json:"name"`
+	// Extra holds the raw JSON of claims requested via
+	// [WithExtraClaims], keyed by claim name; absent claims have no
+	// entry. Unmarshal into app types as needed.
+	Extra map[string]json.RawMessage `json:"extra,omitempty"`
 }
 
 // Auth performs the OIDC authorization-code flow and manages the app
@@ -116,6 +126,7 @@ type Auth struct {
 	postLogoutRedirect string
 	knownSub           func(sub string) bool
 	forceConsentParams map[string]string
+	extraClaims        []string
 
 	now func() time.Time // test hook
 }
@@ -216,6 +227,22 @@ func WithForceConsentParams(params map[string]string) Option {
 			return errors.New("oidcauth: WithForceConsentParams requires at least one parameter")
 		}
 		a.forceConsentParams = maps.Clone(params)
+		return nil
+	}
+}
+
+// WithExtraClaims names additional ID-token claims to carry into the
+// session, exposed raw on [User].Extra. Use it when the issuer emits
+// claims beyond the standard profile set that apps need at login —
+// e.g. upstream-identity claims a broker adds for account-migration
+// durability. Claims absent from a token are simply omitted. Keep the
+// list small: the session rides in a cookie.
+func WithExtraClaims(names ...string) Option {
+	return func(a *Auth) error {
+		if len(names) == 0 {
+			return errors.New("oidcauth: WithExtraClaims requires at least one claim name")
+		}
+		a.extraClaims = slices.Clone(names)
 		return nil
 	}
 }

@@ -62,8 +62,15 @@ flag; `https://` enables it. Cookies are always `HttpOnly` and
   session and any upstream (e.g. Google) consent are untouched.
   POST-only, to prevent CSRF-forced logout; drive it from a form or a
   `fetch` POST, not a link.
+- `ClearSession` — ends the session from inside your own handler
+  (e.g. account deletion), where redirecting the in-flight POST to the
+  POST-only logout endpoint is not possible.
 - `RequireAuth` middleware + `UserFromContext` — gate handlers and
-  read the verified `sub`, `email`, `email_verified`, `name`.
+  read the verified `iss`, `sub`, `email`, `email_verified`, `name`.
+- `WithExtraClaims("claim", ...)` — carry additional ID-token claims
+  into the session, raw, on `User.Extra`. Useful when your issuer
+  emits nonstandard claims apps need at login (e.g. a broker's
+  upstream-identity claims — see the migration caveat below).
 - `Auth.User(r)` — optional-auth check for public pages (login vs
   logout links).
 - Session: HMAC-signed cookie holding the verified claims;
@@ -79,11 +86,14 @@ flag; `https://` enables it. Cookies are always `HttpOnly` and
   (e.g. Google used directly), `WithForceConsentParams` overrides the
   parameters.
 
-## Key accounts on `sub`, never on email
+## Key accounts on `(iss, sub)`, never on email
 
-The ID token's `sub` claim is the **only** value an app may use as an
-account key. Store email *alongside* `sub` for display and migration,
-but never key on it:
+The pair (issuer, `sub`) is the **only** identifier an app may use as
+an account key — `sub` is unique and never reassigned *within* an
+issuer, and means nothing outside it. `User.Issuer` carries the
+verified `iss` so apps can store the pair. Store email *alongside* it
+for display and recovery, but never key on it and never auto-link
+accounts by it:
 
 - OIDC guarantees `sub` is unique per issuer and never reassigned. It
   guarantees nothing about email.
@@ -95,6 +105,12 @@ but never key on it:
 - A second connector (passkeys, GitHub, ...) can present the same
   email under a different `sub`; email-keying silently merges
   distinct identities.
+- Auto-linking a new `sub` to an existing account because the emails
+  match is the same takeover with extra steps (the "nOAuth" attack
+  class: some issuers emit attacker-controlled or unverified emails).
+  Email may only ever *suggest* a link that the user then proves —
+  e.g. by a verification challenge to that address — never establish
+  one by itself.
 
 **Issuer-migration caveat:** `sub` is unique and stable only *within*
 an issuer, and its value is opaque — issuers commonly derive it from
@@ -103,8 +119,13 @@ user came through, and that backend's user id). Replacing the issuer
 implementation, or changing how it authenticates users upstream, can
 therefore change every `sub` even when the issuer URL stays the same.
 A migration must either preserve `sub` values or map old→new via a
-stored secondary attribute such as email. This is why you store email
-alongside `sub` even though you never key on it.
+stored durable attribute. The best durable attribute is the upstream
+pair itself — (authentication backend, backend's user id) — captured
+via `WithExtraClaims` when the issuer emits it as claims, or derived
+from `sub` when the issuer documents its encoding. Email is the
+fallback mapping attribute, subject to the verification rule above.
+This is why you store email and any upstream identity alongside
+`(iss, sub)` even though you never key on them.
 
 ## License
 
