@@ -94,11 +94,15 @@ but never key on it:
   email under a different `sub`; email-keying silently merges
   distinct identities.
 
-**Broker-migration caveat:** Dex's `sub` encodes the connector and the
-upstream user id. Replacing the broker implementation or switching
-connectors changes every `sub`. A future migration must either
-preserve `sub` values or map old→new using the stored emails. This is
-why you store email alongside `sub` even though you never key on it.
+**Issuer-migration caveat:** `sub` is unique and stable only *within*
+an issuer, and its value is opaque — issuers commonly derive it from
+internal or upstream identifiers (which authentication backend the
+user came through, and that backend's user id). Replacing the issuer
+implementation, or changing how it authenticates users upstream, can
+therefore change every `sub` even when the issuer URL stays the same.
+A migration must either preserve `sub` values or map old→new via a
+stored secondary attribute such as email. This is why you store email
+alongside `sub` even though you never key on it.
 
 ## License
 
