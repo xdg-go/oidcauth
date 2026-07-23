@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -114,6 +115,7 @@ type Auth struct {
 
 	postLogoutRedirect string
 	knownSub           func(sub string) bool
+	forceConsentParams map[string]string
 
 	now func() time.Time // test hook
 }
@@ -185,13 +187,35 @@ func WithPostLogoutRedirect(p string) Option {
 // with a forced consent prompt when known(sub) reports an unfamiliar
 // user, so each user sees an explicit consent screen exactly once per
 // app. known must be fast and non-blocking (e.g. a map or indexed DB
-// lookup). The restart happens at most once per login attempt.
+// lookup). The restart happens at most once per login attempt. The
+// parameters sent on the restart are issuer-neutral by default; see
+// [WithForceConsentParams].
 func ForceApprovalIfNewUser(known func(sub string) bool) Option {
 	return func(a *Auth) error {
 		if known == nil {
 			return errors.New("oidcauth: ForceApprovalIfNewUser requires a non-nil func")
 		}
 		a.knownSub = known
+		return nil
+	}
+}
+
+// WithForceConsentParams replaces the extra authorization-request
+// parameters sent when [ForceApprovalIfNewUser] triggers a consent
+// restart. The default sends both the standard OIDC `prompt=consent`
+// and the pre-OIDC `approval_prompt=force`: conformant issuers must
+// ignore parameters they don't recognize (RFC 6749 §3.1), so each
+// issuer honors the one it knows — no issuer-specific configuration
+// needed. Override only for an issuer that rejects the combination
+// (Google, used directly, errors on conflicting prompt parameters):
+//
+//	oidcauth.WithForceConsentParams(map[string]string{"prompt": "consent"})
+func WithForceConsentParams(params map[string]string) Option {
+	return func(a *Auth) error {
+		if len(params) == 0 {
+			return errors.New("oidcauth: WithForceConsentParams requires at least one parameter")
+		}
+		a.forceConsentParams = maps.Clone(params)
 		return nil
 	}
 }
@@ -240,7 +264,11 @@ func New(ctx context.Context, cfg Config, opts ...Option) (*Auth, error) {
 		callbackPath:       callbackPath,
 		logoutPath:         "/auth/logout",
 		postLogoutRedirect: "/",
-		now:                time.Now,
+		forceConsentParams: map[string]string{
+			"prompt":          "consent", // standard OIDC
+			"approval_prompt": "force",   // pre-OIDC; e.g. Dex <= v2.45.1 honors only this
+		},
+		now: time.Now,
 	}
 	for _, opt := range opts {
 		if err := opt(a); err != nil {

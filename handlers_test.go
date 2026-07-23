@@ -113,8 +113,10 @@ func TestLoginHandlerAuthRequest(t *testing.T) {
 	if !strings.Contains(q.Get("scope"), "openid") {
 		t.Errorf("scope %q missing openid", q.Get("scope"))
 	}
-	if q.Get("approval_prompt") != "" {
-		t.Errorf("unforced login must not send approval_prompt")
+	for _, p := range []string{"prompt", "approval_prompt"} {
+		if q.Get(p) != "" {
+			t.Errorf("unforced login must not send %s", p)
+		}
 	}
 
 	// The state cookie must bind state and nonce and record next.
@@ -300,8 +302,13 @@ func TestForceApprovalIfNewUser(t *testing.T) {
 		t.Fatalf("session cookie set before forced consent")
 	}
 
-	// The forced login must carry the consent-forcing parameter.
+	// The forced login must carry both consent-forcing parameters:
+	// the standard OIDC one and the pre-OIDC one, so any conformant
+	// issuer honors whichever it recognizes.
 	authURL2, stateCookie2 := startLogin(t, a, loc.String())
+	if got := authURL2.Query().Get("prompt"); got != "consent" {
+		t.Errorf("forced login prompt = %q, want consent", got)
+	}
 	if got := authURL2.Query().Get("approval_prompt"); got != "force" {
 		t.Errorf("forced login approval_prompt = %q, want force", got)
 	}
@@ -318,6 +325,23 @@ func TestForceApprovalIfNewUser(t *testing.T) {
 	}
 	if sessionCookie(t, a, rr2) == nil {
 		t.Fatalf("forced callback set no session cookie")
+	}
+}
+
+// TestWithForceConsentParams covers the escape hatch for issuers that
+// reject the default prompt + approval_prompt combination.
+func TestWithForceConsentParams(t *testing.T) {
+	idp := newFakeIDP(t)
+	a := newTestAuth(t, idp,
+		ForceApprovalIfNewUser(func(string) bool { return false }),
+		WithForceConsentParams(map[string]string{"prompt": "consent"}))
+
+	authURL, _ := startLogin(t, a, "/auth/login?force=1")
+	if got := authURL.Query().Get("prompt"); got != "consent" {
+		t.Errorf("prompt = %q, want consent", got)
+	}
+	if got := authURL.Query().Get("approval_prompt"); got != "" {
+		t.Errorf("approval_prompt = %q, want absent after override", got)
 	}
 }
 

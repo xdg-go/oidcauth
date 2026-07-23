@@ -10,16 +10,6 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// forceConsentOptions are the extra authorization-request parameters
-// sent when [ForceApprovalIfNewUser] triggers a consent restart.
-// `approval_prompt=force` is set explicitly rather than via
-// oauth2.ApprovalForce, which sends `prompt=consent` as of x/oauth2
-// v0.36 — a parameter Dex (v2.45.1) ignores, while it honors
-// `approval_prompt=force` even when skipApprovalScreen is set.
-var forceConsentOptions = []oauth2.AuthCodeOption{
-	oauth2.SetAuthURLParam("approval_prompt", "force"),
-}
-
 // LoginHandler starts the authorization-code flow: it generates state,
 // nonce, and a PKCE (S256) verifier, binds them to the browser via a
 // signed short-lived cookie, and redirects to the issuer.
@@ -48,7 +38,9 @@ func (a *Auth) LoginHandler() http.Handler {
 			oauth2.S256ChallengeOption(st.Verifier),
 		}
 		if st.Forced {
-			opts = append(opts, forceConsentOptions...)
+			for k, v := range a.forceConsentParams {
+				opts = append(opts, oauth2.SetAuthURLParam(k, v))
+			}
 		}
 		http.Redirect(w, r, a.oauth.AuthCodeURL(st.State, opts...), http.StatusFound)
 	})

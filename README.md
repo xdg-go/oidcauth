@@ -68,9 +68,14 @@ flag; `https://` enables it. Cookies are always `HttpOnly` and
   `WithSessionTTL` configures lifetime (default 24h).
 - `ForceApprovalIfNewUser(func(sub string) bool)` — when the callback
   sees a `sub` your app has not recorded, the auth request restarts
-  once with `approval_prompt=force` so each user gets an explicit
-  consent screen exactly once per app. (Sent as `approval_prompt`
-  because Dex v2.45.1 honors that and ignores OIDC `prompt`.)
+  once with a forced consent prompt, so each user gets an explicit
+  consent screen exactly once per app. The restart sends both the
+  standard OIDC `prompt=consent` and the pre-OIDC
+  `approval_prompt=force`; conformant issuers ignore whichever they
+  don't recognize (RFC 6749 §3.1), so this works issuer-neutrally
+  without configuration. For an issuer that rejects the combination
+  (e.g. Google used directly), `WithForceConsentParams` overrides the
+  parameters.
 
 ## Key accounts on `sub`, never on email
 
