@@ -547,6 +547,9 @@ func TestSanitizeNext(t *testing.T) {
 		"javascript:alert(1)":    "/",
 		"/ok\\..\\backslash":     "/",
 		"/crlf\r\nSet-Cookie: x": "/",
+		"/\t/evil.com":           "/",
+		"/\x00/evil.com":         "/",
+		"/\f/evil.com":           "/",
 	}
 	for in, want := range cases {
 		if got := sanitizeNext(in); got != want {

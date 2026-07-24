@@ -205,7 +205,11 @@ func sanitizeNext(next string) string {
 	if next == "" ||
 		!strings.HasPrefix(next, "/") ||
 		strings.HasPrefix(next, "//") ||
-		strings.ContainsAny(next, "\\\r\n") {
+		strings.ContainsRune(next, '\\') ||
+		// Reject all C0 control characters (including tab, CR, and LF).
+		// Browsers strip these while parsing a URL, so "/\t/evil.com"
+		// would re-parse into the protocol-relative "//evil.com".
+		strings.ContainsFunc(next, func(r rune) bool { return r < 0x20 }) {
 		return "/"
 	}
 	return next
