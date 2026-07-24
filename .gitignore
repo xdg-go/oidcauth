@@ -4,3 +4,4 @@ go.work.sum
 *.env
 coverage.out
 coverage.html
+oidcauth.test
