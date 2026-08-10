@@ -152,7 +152,7 @@ func (a *Auth) CallbackHandler() http.Handler {
 		// app that never records subs therefore gets one consent prompt
 		// per login, never a redirect loop. The ID token verified above
 		// is discarded; the restart is a full fresh auth request.
-		if a.knownSub != nil && !st.ConsentRestart && !a.knownSub(user.Sub) {
+		if a.knownSub != nil && !st.ConsentRestart && !a.knownSub(user.Issuer, user.Sub) {
 			v := url.Values{"consent_restart": {"1"}}
 			if st.Next != "/" {
 				v.Set("next", st.Next)

@@ -379,7 +379,12 @@ func TestCallbackRejectsUnreadableClaims(t *testing.T) {
 func TestForceApprovalIfNewUser(t *testing.T) {
 	idp := newFakeIDP(t)
 	known := map[string]bool{}
-	a := newTestAuth(t, idp, ForceApprovalIfNewUser(func(sub string) bool { return known[sub] }))
+	a := newTestAuth(t, idp, ForceApprovalIfNewUser(func(iss, sub string) bool {
+		if iss != idp.srv.URL {
+			t.Errorf("known called with iss = %q, want %q", iss, idp.srv.URL)
+		}
+		return known[iss+"|"+sub]
+	}))
 
 	// Unknown sub: the callback restarts login with consent_restart=1
 	// instead of creating a session.
@@ -433,7 +438,7 @@ func TestForceApprovalIfNewUser(t *testing.T) {
 func TestWithForceConsentParams(t *testing.T) {
 	idp := newFakeIDP(t)
 	a := newTestAuth(t, idp,
-		ForceApprovalIfNewUser(func(string) bool { return false }),
+		ForceApprovalIfNewUser(func(string, string) bool { return false }),
 		WithForceConsentParams(map[string]string{"prompt": "consent"}))
 
 	authURL, _ := startLogin(t, a, "/auth/login?consent_restart=1")

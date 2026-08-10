@@ -124,7 +124,7 @@ type Auth struct {
 	logoutPath   string
 
 	postLogoutRedirect string
-	knownSub           func(sub string) bool
+	knownSub           func(iss, sub string) bool
 	forceConsentParams map[string]string
 	extraClaims        []string
 
@@ -195,13 +195,15 @@ func WithPostLogoutRedirect(p string) Option {
 }
 
 // ForceApprovalIfNewUser makes the callback restart the auth request
-// with a forced consent prompt when known(sub) reports an unfamiliar
-// user, so each user sees an explicit consent screen exactly once per
-// app. known must be fast and non-blocking (e.g. a map or indexed DB
-// lookup). The restart happens at most once per login attempt. The
-// parameters sent on the restart are issuer-neutral by default; see
-// [WithForceConsentParams].
-func ForceApprovalIfNewUser(known func(sub string) bool) Option {
+// with a forced consent prompt when known(iss, sub) reports an
+// unfamiliar user, so each user sees an explicit consent screen
+// exactly once per app. iss is the verified issuer of the ID token —
+// constant per [Auth], but passed so known can be a store method
+// keyed on the (iss, sub) account pair. known must be fast and
+// non-blocking (e.g. a map or indexed DB lookup). The restart happens
+// at most once per login attempt. The parameters sent on the restart
+// are issuer-neutral by default; see [WithForceConsentParams].
+func ForceApprovalIfNewUser(known func(iss, sub string) bool) Option {
 	return func(a *Auth) error {
 		if known == nil {
 			return errors.New("oidcauth: ForceApprovalIfNewUser requires a non-nil func")

@@ -75,8 +75,9 @@ flag; `https://` enables it. Cookies are always `HttpOnly` and
   logout links).
 - Session: HMAC-signed cookie holding the verified claims;
   `WithSessionTTL` configures lifetime (default 24h).
-- `ForceApprovalIfNewUser(func(sub string) bool)` — when the callback
-  sees a `sub` your app has not recorded, the auth request restarts
+- `ForceApprovalIfNewUser(func(iss, sub string) bool)` — when the
+  callback sees an (`iss`, `sub`) pair your app has not recorded, the
+  auth request restarts
   once with a forced consent prompt, so each user gets an explicit
   consent screen exactly once per app. The default prompt parameters
   are issuer-neutral; for an issuer that rejects them (e.g. Google

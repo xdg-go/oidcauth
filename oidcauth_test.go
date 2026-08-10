@@ -11,7 +11,7 @@ import (
 // TestOptionSettersApply exercises the success path of every functional
 // option directly against a bare Auth, asserting each writes its field.
 func TestOptionSettersApply(t *testing.T) {
-	known := func(string) bool { return true }
+	known := func(string, string) bool { return true }
 	a := &Auth{}
 	opts := []Option{
 		WithSessionTTL(2 * time.Hour),
@@ -44,7 +44,7 @@ func TestOptionSettersApply(t *testing.T) {
 	if a.postLogoutRedirect != "/bye" {
 		t.Errorf("postLogoutRedirect = %q, want /bye", a.postLogoutRedirect)
 	}
-	if a.knownSub == nil || !a.knownSub("x") {
+	if a.knownSub == nil || !a.knownSub("iss", "x") {
 		t.Errorf("knownSub not set")
 	}
 	if len(a.forceConsentParams) != 1 || a.forceConsentParams["prompt"] != "consent" {
