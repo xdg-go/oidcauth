@@ -1,7 +1,6 @@
 package oidcauth
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -22,7 +21,7 @@ const (
 
 func newTestAuth(t *testing.T, idp *fakeIDP, opts ...Option) *Auth {
 	t.Helper()
-	a, err := New(context.Background(), Config{
+	a, err := New(Config{
 		Issuer:       idp.srv.URL,
 		ClientID:     testClientID,
 		ClientSecret: "test-secret",
@@ -217,6 +216,27 @@ func TestCallbackRejectsMissingStateCookie(t *testing.T) {
 	a.CallbackHandler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
+// TestCallbackRejectsTamperedStateCookie covers stateFromRequest's
+// verify and unmarshal failure paths: a garbage-MAC cookie and a
+// validly-signed non-JSON payload must both 400.
+func TestCallbackRejectsTamperedStateCookie(t *testing.T) {
+	idp := newFakeIDP(t)
+	a := newTestAuth(t, idp)
+
+	for name, value := range map[string]string{
+		"garbage MAC":    base64.RawURLEncoding.EncodeToString([]byte(`{"state":"x"}`)) + ".AAAA",
+		"signed garbage": a.sign(purposeState, []byte("not json")),
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/auth/callback?state=x&code=y", nil)
+		req.AddCookie(&http.Cookie{Name: a.stateCookieName(), Value: value})
+		rr := httptest.NewRecorder()
+		a.CallbackHandler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", name, rr.Code)
+		}
 	}
 }
 

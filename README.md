@@ -16,8 +16,13 @@ go get github.com/xdg-go/oidcauth
 
 ```go
 func main() {
-	auth, err := oidcauth.NewFromEnv(context.Background())
+	auth, err := oidcauth.NewFromEnv()
 	if err != nil {
+		log.Fatal(err)
+	}
+	// Optional: fail startup if the issuer is unreachable. Without
+	// this, discovery happens lazily on the first login.
+	if err := auth.Connect(context.Background()); err != nil {
 		log.Fatal(err)
 	}
 
@@ -65,18 +70,14 @@ flag; `https://` enables it. Cookies are always `HttpOnly` and
 - `ClearSession` — ends the session from inside your own handler
   (e.g. account deletion), where redirecting the in-flight POST to the
   POST-only logout endpoint is not possible.
-- `SessionClearer(cfg, opts...)` — package-level: returns a clear
-  function equivalent to `ClearSession` without constructing an `Auth`
-  (no OIDC discovery, no network). Validation happens once at
-  construction, so the returned function cannot fail — use it when a
-  handler must end the session even if the issuer is unreachable.
-- `SessionReader(cfg, opts...)` — package-level counterpart of `User`:
-  reads and verifies the session cookie without constructing an
-  `Auth`. Session verification is anchored in your `CookieSecret`
-  (HMAC), not the issuer's keys, so existing sessions keep working
-  while the issuer is unreachable. There is deliberately no static
-  session *setter*: minting a session asserts issuer verification and
-  requires the discovery-backed `Auth`.
+- Lazy connection — `New` performs no I/O; OIDC discovery runs on
+  demand from the login and callback handlers (one attempt at a time,
+  with a short cooldown after failure), so your app starts even while
+  the issuer is down. Session verification is anchored in your
+  `CookieSecret` (HMAC), not the issuer's keys, so existing sessions
+  keep working through an issuer outage; only new logins depend on the
+  issuer, and they return 503 until discovery succeeds. `Connect` makes
+  discovery eager for apps that want startup to fail on a bad issuer.
 - `RequireAuth` middleware + `UserFromContext` — gate handlers and
   read the verified `iss`, `sub`, `email`, `email_verified`, `name`.
 - `WithExtraClaims("claim", ...)` — carry additional ID-token claims

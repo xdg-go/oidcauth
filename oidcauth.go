@@ -27,10 +27,12 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
+	"golang.org/x/sync/singleflight"
 )
 
 // Config holds the settings required to construct an [Auth]. Use
@@ -110,8 +112,20 @@ type User struct {
 // session cookie. Construct with [New] or [NewFromEnv]; mount its
 // handlers with [Auth.Mount] or individually.
 type Auth struct {
-	oauth    oauth2.Config
-	verifier *oidc.IDTokenVerifier
+	oauth      oauth2.Config
+	issuer     string
+	httpClient *http.Client
+
+	// Lazy discovery state. verifier doubles as the "discovered"
+	// flag: it is nil until discovery succeeds and immutable after.
+	// sf collapses concurrent discovery attempts into one flight,
+	// and after a failed attempt callers fail fast with discErr
+	// until discoveryCooldown elapses.
+	sf          singleflight.Group
+	mu          sync.Mutex
+	verifier    *oidc.IDTokenVerifier
+	discErr     error     // last failed attempt's error
+	lastAttempt time.Time // when discErr was recorded
 
 	cookieSecret  []byte
 	secureCookies bool
@@ -249,38 +263,34 @@ func WithExtraClaims(names ...string) Option {
 	}
 }
 
+// httpTimeout bounds every network call this package makes —
+// discovery, JWKS fetches during ID-token verification, and the token
+// exchange. The zero-timeout http.DefaultClient would let a hung
+// issuer pin a request (or process shutdown) indefinitely.
+const httpTimeout = 10 * time.Second
+
+// discoveryCooldown is how long after a failed discovery attempt
+// callers fail fast with the cached error instead of retrying, so a
+// hard-down issuer is not re-probed once per request.
+const discoveryCooldown = 2 * time.Second
+
 // NewFromEnv is shorthand for [FromEnv] followed by [New].
-func NewFromEnv(ctx context.Context, opts ...Option) (*Auth, error) {
+func NewFromEnv(opts ...Option) (*Auth, error) {
 	cfg, err := FromEnv()
 	if err != nil {
 		return nil, err
 	}
-	return New(ctx, cfg, opts...)
+	return New(cfg, opts...)
 }
 
-// New validates cfg, performs OIDC discovery against cfg.Issuer, and
-// returns an Auth ready to serve. The context governs discovery and is
-// retained for background JWKS refreshes.
-func New(ctx context.Context, cfg Config, opts ...Option) (*Auth, error) {
-	a, err := newAuth(cfg, opts...)
-	if err != nil {
-		return nil, err
-	}
-
-	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
-	if err != nil {
-		return nil, fmt.Errorf("oidcauth: OIDC discovery for %s: %w", cfg.Issuer, err)
-	}
-	a.oauth.Endpoint = provider.Endpoint()
-	a.verifier = provider.Verifier(&oidc.Config{ClientID: cfg.ClientID})
-	return a, nil
-}
-
-// newAuth performs every part of construction that needs no network:
-// config validation, defaults, and option application. The returned
-// Auth lacks the provider endpoint and verifier, which New fills in
-// after discovery.
-func newAuth(cfg Config, opts ...Option) (*Auth, error) {
+// New validates cfg and returns an [Auth]. It performs no I/O: OIDC
+// discovery against cfg.Issuer happens on demand from the login and
+// callback handlers, so an app can start — and serve existing
+// sessions, which are verified against cfg.CookieSecret rather than
+// the issuer's keys — while the issuer is unreachable. Apps that want
+// startup to fail on an unreachable or misconfigured issuer call
+// [Auth.Connect] after New.
+func New(cfg Config, opts ...Option) (*Auth, error) {
 	if len(cfg.CookieSecret) < 32 {
 		return nil, fmt.Errorf("oidcauth: cookie secret must be at least 32 bytes, got %d",
 			len(cfg.CookieSecret))
@@ -297,6 +307,8 @@ func newAuth(cfg Config, opts ...Option) (*Auth, error) {
 			RedirectURL:  cfg.RedirectURL,
 			Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
 		},
+		issuer:             cfg.Issuer,
+		httpClient:         &http.Client{Timeout: httpTimeout},
 		cookieSecret:       []byte(cfg.CookieSecret),
 		secureCookies:      secure,
 		sessionCookieName:  "_oidcauth",
@@ -319,39 +331,94 @@ func newAuth(cfg Config, opts ...Option) (*Auth, error) {
 	return a, nil
 }
 
-// SessionClearer returns a function that clears the session cookie an
-// [Auth] built from the same cfg and opts would set. It needs no
-// network: unlike [Auth.ClearSession], it works without OIDC
-// discovery, so handlers that must end the session (e.g. account
-// deletion) don't depend on a constructed Auth — or on the issuer
-// being reachable. Validation happens here, once, so the returned
-// function cannot fail. The error covers the same config and option
-// validation as [New].
-func SessionClearer(cfg Config, opts ...Option) (func(http.ResponseWriter), error) {
-	a, err := newAuth(cfg, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return a.clearSessionCookie, nil
+// Connect performs OIDC discovery now instead of on demand, so that
+// an unreachable or misconfigured issuer surfaces as a startup error
+// rather than 503s at login time. It is optional and idempotent:
+// handlers trigger the same discovery lazily, and once discovery has
+// succeeded Connect returns nil immediately. ctx bounds only this
+// call's wait; the attempt itself is bounded by the Auth's internal
+// HTTP client timeout.
+func (a *Auth) Connect(ctx context.Context) error {
+	return a.ensureDiscovered(ctx)
 }
 
-// SessionReader returns a function that reads and verifies the
-// session cookie an [Auth] built from the same cfg and opts would set
-// — the static counterpart of [Auth.User]. Like [SessionClearer] it
-// needs no network: session verification is anchored in
-// cfg.CookieSecret (HMAC), not the issuer's keys, so existing
-// sessions can be served before OIDC discovery has ever succeeded.
-// Validation happens here, once, so the returned function cannot
-// fail; it reports ok=false for an absent, tampered, or expired
-// cookie. There is deliberately no static session *setter*: minting a
-// session asserts that the issuer verified the user, which requires
-// the discovery-backed [Auth].
-func SessionReader(cfg Config, opts ...Option) (func(*http.Request) (User, bool), error) {
-	a, err := newAuth(cfg, opts...)
-	if err != nil {
-		return nil, err
+// ensureDiscovered returns nil once OIDC discovery has succeeded,
+// running it on demand. ctx bounds only this caller's wait: the
+// attempt itself runs on singleflight's own goroutine with the
+// internal client's timeout, so one impatient caller cannot kill an
+// attempt others are waiting on. Concurrent callers share a single
+// attempt, and for discoveryCooldown after a failure callers get that
+// error without a new attempt.
+func (a *Auth) ensureDiscovered(ctx context.Context) error {
+	// The flight intentionally ignores the caller's ctx: its result
+	// serves every waiter (ctx bounds only this caller's wait, in the
+	// select below), and it is time-bounded by the internal client's
+	// timeout, not by cancellation. DoChan's channel is buffered, so
+	// abandoning it leaks nothing.
+	ch := a.sf.DoChan("discover", func() (any, error) { //nolint:contextcheck,gosec // G118: detached by design; see above
+		return nil, a.discover()
+	})
+	select {
+	case res := <-ch:
+		return res.Err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return a.User, nil
+}
+
+// discover runs one discovery attempt and records the outcome, unless prior
+// attempts take precedence: prior success shortcircuits, and a recent, prior
+// failure inside the cooldown window is returned without a new attempt.
+//
+// Invariant: verifier (with oauth.Endpoint) is write-once — set by
+// whichever attempt first succeeds, immutable after. Both the check
+// and the set run under mu, and the set re-checks for a winner, so
+// the invariant holds even for concurrent discover calls; the
+// singleflight wrapper in ensureDiscovered is an efficiency layer
+// (dedupe and shared waiting), not a correctness dependency. The
+// invariant is what lets handlers read verifier and oauth.Endpoint
+// lock-free after ensureDiscovered: a write after their
+// happens-before edge (the flight-result channel receive) would be a
+// data race.
+func (a *Auth) discover() error {
+	a.mu.Lock()
+	if a.verifier != nil {
+		a.mu.Unlock()
+		return nil
+	}
+	if a.discErr != nil && a.now().Sub(a.lastAttempt) < discoveryCooldown {
+		err := a.discErr
+		a.mu.Unlock()
+		return err
+	}
+	a.mu.Unlock()
+
+	// The ctx passed to NewProvider supplies the HTTP client for the
+	// discovery call and (per go-oidc v3 internals) for future JWKS
+	// fetches; it is NOT retained for cancellation — the provider's
+	// RemoteKeySet is built on context.Background(), and JWKS fetch
+	// cancellation rides the ctx later passed to Verify. If go-oidc
+	// ever re-retains this ctx, nothing breaks: it is never canceled.
+	ctx := oidc.ClientContext(context.Background(), a.httpClient)
+	provider, err := oidc.NewProvider(ctx, a.issuer)
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.verifier != nil {
+		// Another attempt won while this one was on the network; keep
+		// the winner's result (discarding this provider) so verifier
+		// is never rewritten.
+		return nil
+	}
+	if err != nil {
+		a.discErr = fmt.Errorf("oidcauth: OIDC discovery for %s: %w", a.issuer, err)
+		a.lastAttempt = a.now()
+		return a.discErr
+	}
+	a.oauth.Endpoint = provider.Endpoint()
+	a.verifier = provider.Verifier(&oidc.Config{ClientID: a.oauth.ClientID})
+	a.discErr = nil
+	return nil
 }
 
 func parseRedirectURL(raw string) (callbackPath string, secure bool, err error) {

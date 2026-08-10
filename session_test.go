@@ -93,6 +93,19 @@ func TestSessionCookieTamperDetected(t *testing.T) {
 	}
 }
 
+// TestSessionCookieSignedGarbageRejected covers the unmarshal branch:
+// a payload HMAC'd with the real key but not valid JSON.
+func TestSessionCookieSignedGarbageRejected(t *testing.T) {
+	a := cookieAuth(testCookieKey)
+	c := &http.Cookie{
+		Name:  a.sessionCookieName,
+		Value: a.sign(purposeSession, []byte("not json")),
+	}
+	if _, err := a.sessionUser(requestWithCookie(c)); err == nil {
+		t.Error("signed non-JSON payload accepted")
+	}
+}
+
 func TestSessionCookieWrongKeyRejected(t *testing.T) {
 	a := cookieAuth(testCookieKey)
 	rr := httptest.NewRecorder()
@@ -164,7 +177,7 @@ func TestFromEnv(t *testing.T) {
 }
 
 func TestNewRejectsShortCookieSecret(t *testing.T) {
-	_, err := New(t.Context(), Config{
+	_, err := New(Config{
 		Issuer: "https://auth.example.com", ClientID: "app", ClientSecret: "s",
 		RedirectURL: "https://app.example.com/auth/callback", CookieSecret: "short",
 	})

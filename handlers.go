@@ -1,6 +1,7 @@
 package oidcauth
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
@@ -28,6 +29,10 @@ func (a *Auth) LoginHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := a.ensureDiscovered(r.Context()); err != nil {
+			serviceUnavailable(w)
 			return
 		}
 		st := statePayload{
@@ -63,6 +68,10 @@ func (a *Auth) CallbackHandler() http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if err := a.ensureDiscovered(r.Context()); err != nil {
+			serviceUnavailable(w)
+			return
+		}
 		st, err := a.stateFromRequest(r)
 		// One-shot: whatever happens next, this login attempt is spent.
 		a.clearStateCookie(w)
@@ -90,7 +99,10 @@ func (a *Auth) CallbackHandler() http.Handler {
 			return
 		}
 
-		token, err := a.oauth.Exchange(r.Context(), code, oauth2.VerifierOption(st.Verifier))
+		// oauth2 takes its HTTP client from the context; without this it would
+		// fall back to the timeout-less http.DefaultClient.
+		exchCtx := context.WithValue(r.Context(), oauth2.HTTPClient, a.httpClient)
+		token, err := a.oauth.Exchange(exchCtx, code, oauth2.VerifierOption(st.Verifier))
 		if err != nil {
 			http.Error(w, "code exchange failed", http.StatusBadGateway)
 			return
@@ -197,6 +209,15 @@ func (a *Auth) LogoutHandler() http.Handler {
 // app's session, exactly like LogoutHandler.
 func (a *Auth) ClearSession(w http.ResponseWriter) {
 	a.clearSessionCookie(w)
+}
+
+// serviceUnavailable reports that OIDC discovery has not (yet)
+// succeeded. Discovery retries automatically (subject to a short
+// cooldown), so a Retry-After hint is honest.
+func serviceUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "2")
+	http.Error(w, "authentication service unavailable; retry shortly",
+		http.StatusServiceUnavailable)
 }
 
 // sanitizeNext restricts post-login redirects to same-origin relative

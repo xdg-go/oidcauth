@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -40,6 +41,21 @@ type fakeIDP struct {
 	// omitIDToken, when true, makes the token endpoint return a
 	// successful response with no id_token, simulating a broken issuer.
 	omitIDToken bool
+
+	// discoveryStatus, when non-zero, makes the discovery endpoint
+	// respond with that HTTP status, simulating an issuer outage.
+	// Atomic: tests flip it while the Auth's discovery goroutine reads.
+	discoveryStatus atomic.Int32
+
+	// discoveryCount counts discovery requests served, for asserting
+	// singleflight and cooldown behavior.
+	discoveryCount atomic.Int32
+
+	// discoveryHook, when non-nil, runs at the start of every discovery
+	// request. Tests use it to block or observe requests; any
+	// per-request policy (e.g. block only the first) lives in the test.
+	// Set before any request is made; read-only afterward.
+	discoveryHook func()
 }
 
 func newFakeIDP(t *testing.T) *fakeIDP {
@@ -52,6 +68,14 @@ func newFakeIDP(t *testing.T) *fakeIDP {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		idp.discoveryCount.Add(1)
+		if idp.discoveryHook != nil {
+			idp.discoveryHook()
+		}
+		if status := idp.discoveryStatus.Load(); status != 0 {
+			http.Error(w, "discovery unavailable", int(status))
+			return
+		}
 		writeJSON(w, map[string]any{
 			"issuer":                                idp.srv.URL,
 			"authorization_endpoint":                idp.srv.URL + "/auth",
