@@ -200,7 +200,7 @@ func TestNewReportsDiscoveryFailure(t *testing.T) {
 }
 
 // TestNewRejectsBadOption covers New's option-error branch: a failing
-// option aborts construction even after discovery succeeds.
+// option aborts construction before discovery is attempted.
 func TestNewRejectsBadOption(t *testing.T) {
 	idp := newFakeIDP(t)
 	_, err := New(t.Context(), Config{
@@ -209,5 +209,37 @@ func TestNewRejectsBadOption(t *testing.T) {
 	}, WithCookieName(""))
 	if err == nil {
 		t.Error("New accepted an invalid option")
+	}
+}
+
+// TestSessionClearer proves the network-free clear: no discovery
+// endpoint exists, yet the returned function emits the same
+// cookie-clearing Set-Cookie an Auth would, honoring options.
+func TestSessionClearer(t *testing.T) {
+	cfg := Config{
+		Issuer: "https://unreachable.invalid", ClientID: "app", ClientSecret: "s",
+		RedirectURL: testRedirectURL, CookieSecret: testCookieKey,
+	}
+	clear, err := SessionClearer(cfg, WithCookieName("_sess"))
+	if err != nil {
+		t.Fatalf("SessionClearer: %v", err)
+	}
+	rr := httptest.NewRecorder()
+	clear(rr)
+	cookies := rr.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("got %d cookies, want 1", len(cookies))
+	}
+	c := cookies[0]
+	if c.Name != "_sess" || c.Value != "" || c.MaxAge != -1 {
+		t.Errorf("clear cookie = %+v, want _sess cleared with MaxAge=-1", c)
+	}
+
+	// Validation happens at construction, exactly like New.
+	if _, err := SessionClearer(cfg, WithCookieName("")); err == nil {
+		t.Error("SessionClearer accepted an invalid option")
+	}
+	if _, err := SessionClearer(Config{}); err == nil {
+		t.Error("SessionClearer accepted an empty config")
 	}
 }

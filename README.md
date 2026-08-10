@@ -65,6 +65,11 @@ flag; `https://` enables it. Cookies are always `HttpOnly` and
 - `ClearSession` — ends the session from inside your own handler
   (e.g. account deletion), where redirecting the in-flight POST to the
   POST-only logout endpoint is not possible.
+- `SessionClearer(cfg, opts...)` — package-level: returns a clear
+  function equivalent to `ClearSession` without constructing an `Auth`
+  (no OIDC discovery, no network). Validation happens once at
+  construction, so the returned function cannot fail — use it when a
+  handler must end the session even if the issuer is unreachable.
 - `RequireAuth` middleware + `UserFromContext` — gate handlers and
   read the verified `iss`, `sub`, `email`, `email_verified`, `name`.
 - `WithExtraClaims("claim", ...)` — carry additional ID-token claims

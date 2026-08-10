@@ -27,3 +27,29 @@ no extra index, and cannot false-positive across issuers on colliding
 accepted, same as `http.Request` carrying `Host` on a single-vhost
 server. Revisit only if the option grows more callback shapes;
 sub-only convenience wrappers are not worth the second signature.
+
+## 2026-08-10 — Add network-free SessionClearer instead of exposing cookie attributes
+
+Clearing the session cookie needs only the cookie name and attributes,
+all derivable from `Config` plus options — yet the only clear API,
+`Auth.ClearSession`, required a constructed `Auth`, and `New` performs
+OIDC discovery. Apps that defer construction (the go-vue-app-template
+skeleton defers it so boot doesn't couple to broker availability) were
+forced into an error branch inside logout-adjacent handlers: "can't
+clear a cookie because discovery failed." Released in v0.3.0,
+`SessionClearer(cfg, opts...) (func(http.ResponseWriter), error)`
+runs the network-free half of construction (validation, defaults,
+options — factored into `newAuth`, which `New` now shares) and returns
+a clear function that cannot fail; account deletion can always end the
+session, broker up or down.
+
+Chosen over two alternatives. Exposing the cookie name/attributes as
+getters would leak internals and still make every caller reimplement
+the clearing `Set-Cookie` correctly (Path, HttpOnly, SameSite,
+Secure). A per-call `ClearSessionCookie(w, cfg, opts...) error` keeps
+one function but moves validation to request time, so the error
+branch survives in every handler — the constructor shape validates
+once at wiring time and defines the runtime error out of existence.
+Revisit if more Auth capabilities turn out to be network-free and
+callers want them pre-discovery; the `newAuth` split is the seam a
+lazier `New` would grow from.

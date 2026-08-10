@@ -262,6 +262,25 @@ func NewFromEnv(ctx context.Context, opts ...Option) (*Auth, error) {
 // returns an Auth ready to serve. The context governs discovery and is
 // retained for background JWKS refreshes.
 func New(ctx context.Context, cfg Config, opts ...Option) (*Auth, error) {
+	a, err := newAuth(cfg, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
+	if err != nil {
+		return nil, fmt.Errorf("oidcauth: OIDC discovery for %s: %w", cfg.Issuer, err)
+	}
+	a.oauth.Endpoint = provider.Endpoint()
+	a.verifier = provider.Verifier(&oidc.Config{ClientID: cfg.ClientID})
+	return a, nil
+}
+
+// newAuth performs every part of construction that needs no network:
+// config validation, defaults, and option application. The returned
+// Auth lacks the provider endpoint and verifier, which New fills in
+// after discovery.
+func newAuth(cfg Config, opts ...Option) (*Auth, error) {
 	if len(cfg.CookieSecret) < 32 {
 		return nil, fmt.Errorf("oidcauth: cookie secret must be at least 32 bytes, got %d",
 			len(cfg.CookieSecret))
@@ -271,20 +290,13 @@ func New(ctx context.Context, cfg Config, opts ...Option) (*Auth, error) {
 		return nil, err
 	}
 
-	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
-	if err != nil {
-		return nil, fmt.Errorf("oidcauth: OIDC discovery for %s: %w", cfg.Issuer, err)
-	}
-
 	a := &Auth{
 		oauth: oauth2.Config{
 			ClientID:     cfg.ClientID,
 			ClientSecret: cfg.ClientSecret,
 			RedirectURL:  cfg.RedirectURL,
-			Endpoint:     provider.Endpoint(),
 			Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
 		},
-		verifier:           provider.Verifier(&oidc.Config{ClientID: cfg.ClientID}),
 		cookieSecret:       []byte(cfg.CookieSecret),
 		secureCookies:      secure,
 		sessionCookieName:  "_oidcauth",
@@ -305,6 +317,22 @@ func New(ctx context.Context, cfg Config, opts ...Option) (*Auth, error) {
 		}
 	}
 	return a, nil
+}
+
+// SessionClearer returns a function that clears the session cookie an
+// [Auth] built from the same cfg and opts would set. It needs no
+// network: unlike [Auth.ClearSession], it works without OIDC
+// discovery, so handlers that must end the session (e.g. account
+// deletion) don't depend on a constructed Auth — or on the issuer
+// being reachable. Validation happens here, once, so the returned
+// function cannot fail. The error covers the same config and option
+// validation as [New].
+func SessionClearer(cfg Config, opts ...Option) (func(http.ResponseWriter), error) {
+	a, err := newAuth(cfg, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return a.clearSessionCookie, nil
 }
 
 func parseRedirectURL(raw string) (callbackPath string, secure bool, err error) {
