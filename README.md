@@ -70,6 +70,13 @@ flag; `https://` enables it. Cookies are always `HttpOnly` and
   (no OIDC discovery, no network). Validation happens once at
   construction, so the returned function cannot fail — use it when a
   handler must end the session even if the issuer is unreachable.
+- `SessionReader(cfg, opts...)` — package-level counterpart of `User`:
+  reads and verifies the session cookie without constructing an
+  `Auth`. Session verification is anchored in your `CookieSecret`
+  (HMAC), not the issuer's keys, so existing sessions keep working
+  while the issuer is unreachable. There is deliberately no static
+  session *setter*: minting a session asserts issuer verification and
+  requires the discovery-backed `Auth`.
 - `RequireAuth` middleware + `UserFromContext` — gate handlers and
   read the verified `iss`, `sub`, `email`, `email_verified`, `name`.
 - `WithExtraClaims("claim", ...)` — carry additional ID-token claims

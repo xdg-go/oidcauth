@@ -335,6 +335,25 @@ func SessionClearer(cfg Config, opts ...Option) (func(http.ResponseWriter), erro
 	return a.clearSessionCookie, nil
 }
 
+// SessionReader returns a function that reads and verifies the
+// session cookie an [Auth] built from the same cfg and opts would set
+// — the static counterpart of [Auth.User]. Like [SessionClearer] it
+// needs no network: session verification is anchored in
+// cfg.CookieSecret (HMAC), not the issuer's keys, so existing
+// sessions can be served before OIDC discovery has ever succeeded.
+// Validation happens here, once, so the returned function cannot
+// fail; it reports ok=false for an absent, tampered, or expired
+// cookie. There is deliberately no static session *setter*: minting a
+// session asserts that the issuer verified the user, which requires
+// the discovery-backed [Auth].
+func SessionReader(cfg Config, opts ...Option) (func(*http.Request) (User, bool), error) {
+	a, err := newAuth(cfg, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return a.User, nil
+}
+
 func parseRedirectURL(raw string) (callbackPath string, secure bool, err error) {
 	u, err := url.Parse(raw)
 	if err != nil {

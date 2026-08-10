@@ -52,4 +52,32 @@ branch survives in every handler — the constructor shape validates
 once at wiring time and defines the runtime error out of existence.
 Revisit if more Auth capabilities turn out to be network-free and
 callers want them pre-discovery; the `newAuth` split is the seam a
-lazier `New` would grow from.
+lazier `New` would grow from. **Partly superseded** — the revisit
+happened; see "Complete the static split with SessionReader; no
+static setter".
+
+## 2026-08-10 — Complete the static split with SessionReader; no static setter (supersedes the revisit clause above)
+
+`SessionReader(cfg, opts...) (func(*http.Request) (User, bool), error)`
+joins `SessionClearer` in v0.4.0, built on the same `newAuth` seam.
+The principle that decides which operations get a static form is key
+ownership: the session cookie is signed with the app's symmetric
+`CookieSecret`, so every operation anchored in that secret — clearing
+and now reading/verifying — is local and infallible once config is
+validated. Without this, an app that defers `New` (to decouple boot
+from broker availability) could not verify *existing* sessions during
+a broker outage after a restart: valid HMAC-signed cookies produced
+401s because `Auth.User` was reachable only through discovery. That
+gutted the deferred design's main benefit — the degraded mode it
+promised ("existing sessions keep working, only new logins fail") is
+exactly what failed.
+
+A static session *setter* is deliberately excluded, and should stay
+excluded: minting a session asserts "the issuer verified this user,"
+a claim anchored in the issuer's asymmetric keys (discovery, code
+exchange, JWKS signature check). A `SessionSetter(cfg)` would let app
+code mint sessions for arbitrary claims, severing that attestation —
+there, forcing the discovery-backed `Auth` is the security property.
+The stable boundary: operations anchored in the app's secret are
+static (read, clear); the operation anchored in the issuer's keys
+(mint) requires `New`.

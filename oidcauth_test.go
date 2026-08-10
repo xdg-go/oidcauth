@@ -243,3 +243,51 @@ func TestSessionClearer(t *testing.T) {
 		t.Error("SessionClearer accepted an empty config")
 	}
 }
+
+// TestSessionReader proves the network-free read: a session cookie set
+// by an offline-constructed Auth verifies through SessionReader built
+// from the same config, and fails closed on tampering and on absence.
+func TestSessionReader(t *testing.T) {
+	cfg := Config{
+		Issuer: "https://unreachable.invalid", ClientID: "app", ClientSecret: "s",
+		RedirectURL: testRedirectURL, CookieSecret: testCookieKey,
+	}
+	a, err := newAuth(cfg)
+	if err != nil {
+		t.Fatalf("newAuth: %v", err)
+	}
+	rr := httptest.NewRecorder()
+	a.setSessionCookie(rr, User{Issuer: "https://idp.example.com", Sub: "u1"})
+	cookies := rr.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("got %d cookies, want 1", len(cookies))
+	}
+
+	read, err := SessionReader(cfg)
+	if err != nil {
+		t.Fatalf("SessionReader: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(cookies[0])
+	u, ok := read(req)
+	if !ok || u.Sub != "u1" || u.Issuer != "https://idp.example.com" {
+		t.Errorf("read = %+v, %v; want u1 session, true", u, ok)
+	}
+
+	// Fails closed: no cookie, and a tampered cookie.
+	if _, ok := read(httptest.NewRequest(http.MethodGet, "/", nil)); ok {
+		t.Error("read succeeded with no cookie")
+	}
+	bad := *cookies[0]
+	bad.Value += "x"
+	reqBad := httptest.NewRequest(http.MethodGet, "/", nil)
+	reqBad.AddCookie(&bad)
+	if _, ok := read(reqBad); ok {
+		t.Error("read succeeded with a tampered cookie")
+	}
+
+	// Validation happens at construction, exactly like New.
+	if _, err := SessionReader(Config{}); err == nil {
+		t.Error("SessionReader accepted an empty config")
+	}
+}
