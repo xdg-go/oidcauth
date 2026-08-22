@@ -34,6 +34,14 @@ var errBadCookie = errors.New("oidcauth: invalid or expired cookie")
 type sessionPayload struct {
 	User   User      `json:"user"`
 	Expiry time.Time `json:"exp"`
+
+	// IssuedAt is the mint time as Unix SECONDS (sub-second precision
+	// is truncated). It is an int64 rather than a time.Time so that an
+	// absent field decodes to 0, an unambiguous "not present"
+	// sentinel. A zero time.Time would instead decode from an absent
+	// field as 0001-01-01T00:00:00Z, whose Unix() is a large negative
+	// number.
+	IssuedAt int64 `json:"iat"`
 }
 
 // statePayload is the signed content of the transient login-state
@@ -85,8 +93,9 @@ func (a *Auth) verify(purpose, value string) ([]byte, error) {
 func (a *Auth) stateCookieName() string { return a.sessionCookieName + "_state" }
 
 func (a *Auth) setSessionCookie(w http.ResponseWriter, u User) {
-	exp := a.now().Add(a.sessionTTL)
-	payload, _ := json.Marshal(sessionPayload{User: u, Expiry: exp})
+	now := a.now()
+	exp := now.Add(a.sessionTTL)
+	payload, _ := json.Marshal(sessionPayload{User: u, Expiry: exp, IssuedAt: now.Unix()})
 	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for http://localhost dev)
 		Name:     a.sessionCookieName,
 		Value:    a.sign(purposeSession, payload),

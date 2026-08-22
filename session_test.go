@@ -1,10 +1,12 @@
 package oidcauth
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -224,5 +226,89 @@ func TestParseRedirectURL(t *testing.T) {
 		if p != c.path || secure != c.secure {
 			t.Errorf("parseRedirectURL(%q) = (%q, %v), want (%q, %v)", c.in, p, secure, c.path, c.secure)
 		}
+	}
+}
+
+// TestSessionPayloadIssuedAtRoundTrip pins the IssuedAt encoding: Unix
+// seconds under "iat", so a mint time with sub-second components comes
+// back truncated to the second.
+func TestSessionPayloadIssuedAtRoundTrip(t *testing.T) {
+	a := cookieAuth(testCookieKey)
+	mint := time.Date(2026, 8, 21, 12, 34, 56, 789_000_000, time.UTC)
+	a.now = func() time.Time { return mint }
+
+	rr := httptest.NewRecorder()
+	a.setSessionCookie(rr, User{Sub: "s1"})
+	c := recordedCookie(t, rr, a.sessionCookieName)
+
+	payload, err := a.verify(purposeSession, c.Value)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	var s sessionPayload
+	if err := json.Unmarshal(payload, &s); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if want := mint.Unix(); s.IssuedAt != want {
+		t.Errorf("IssuedAt = %d, want %d", s.IssuedAt, want)
+	}
+	// Truncation is the point: the nanoseconds do not survive.
+	if got := time.Unix(s.IssuedAt, 0).UTC(); !got.Equal(mint.Truncate(time.Second)) {
+		t.Errorf("decoded IssuedAt = %v, want %v", got, mint.Truncate(time.Second))
+	}
+	if !strings.Contains(string(payload), `"iat":`) {
+		t.Errorf("payload lacks iat key: %s", payload)
+	}
+}
+
+// TestSessionPayloadAbsentIssuedAtIsZero pins the fail-closed
+// sentinel: a payload with no "iat" field decodes to IssuedAt == 0.
+func TestSessionPayloadAbsentIssuedAtIsZero(t *testing.T) {
+	var s sessionPayload
+	if err := json.Unmarshal([]byte(`{"user":{"sub":"s1"},"exp":"2030-01-01T00:00:00Z"}`), &s); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if s.IssuedAt != 0 {
+		t.Errorf("absent iat decoded to %d, want 0", s.IssuedAt)
+	}
+}
+
+// TestSessionCookieSingleClockReading guards against setSessionCookie
+// sampling the clock TWICE -- once for Expiry and once for IssuedAt.
+// Two readings can straddle a second boundary (or any skew), leaving a
+// cookie whose Expiry-minus-TTL disagrees with its IssuedAt, which
+// would corrupt any age computation built on the pair. Every other
+// test stubs a.now as a CONSTANT, so it cannot see that bug at all:
+// the advancing clock below is the entire point of this test. Do not
+// "simplify" it back to a fixed instant.
+func TestSessionCookieSingleClockReading(t *testing.T) {
+	a := cookieAuth(testCookieKey)
+
+	// Nth call to a.now returns base + N seconds. The mutex keeps the
+	// counter race-free if this stub is ever shared across goroutines.
+	base := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	calls := 0
+	a.now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		return base.Add(time.Duration(calls) * time.Second)
+	}
+
+	rr := httptest.NewRecorder()
+	a.setSessionCookie(rr, User{Sub: "s1"})
+	c := recordedCookie(t, rr, a.sessionCookieName)
+
+	payload, err := a.verify(purposeSession, c.Value)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	var s sessionPayload
+	if err := json.Unmarshal(payload, &s); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := s.Expiry.Add(-a.sessionTTL).Unix(); got != s.IssuedAt {
+		t.Errorf("Expiry-TTL = %d, IssuedAt = %d: derived from different clock readings", got, s.IssuedAt)
 	}
 }

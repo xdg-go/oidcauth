@@ -63,21 +63,21 @@ Phase 2 (IssuedAt in payload, fail closed)
 Establish what exists before changing it.
 
 ### 1.1 Map the session code path
-- [ ] Locate `sessionPayload`, its encode/decode helpers, the HMAC
+- [x] Locate `sessionPayload`, its encode/decode helpers, the HMAC
       signing/verification code, and the middleware that reads the
       cookie
-- [ ] Write down the current defaults: 24h absolute TTL, cookie name,
+- [x] Write down the current defaults: 24h absolute TTL, cookie name,
       cookie attributes (Secure, HttpOnly, SameSite, Path, Max-Age)
-- [ ] Note every configuration knob an app can set today
+- [x] Note every configuration knob an app can set today
       (`WithSessionTTL` or equivalent) and which are exported
 
 ### 1.2 Characterize expiry
-- [ ] **Test**: accept just before `Expiry`, reject at it and after
+- [x] **Test**: accept just before `Expiry`, reject at it and after
 
 ### 1.3 Introduce a test clock
-- [ ] Route every `time.Now()` in the session path through an
+- [x] Route every `time.Now()` in the session path through an
       injectable clock field (unexported, defaulting to `time.Now`)
-- [ ] **Test**: existing expiry tests pass using the injected clock
+- [x] **Test**: existing expiry tests pass using the injected clock
       instead of real time
 
 ---
@@ -88,10 +88,10 @@ Sliding renewal needs two clocks. Without an issue time, a stolen
 cookie renews forever.
 
 ### 2.1 Extend the payload
-- [ ] Add `IssuedAt` to `sessionPayload`; set it at mint time
-- [ ] **Test**: marshal/unmarshal round-trip preserves `IssuedAt` to
+- [x] Add `IssuedAt` to `sessionPayload`; set it at mint time
+- [x] **Test**: marshal/unmarshal round-trip preserves `IssuedAt` to
       the intended precision (store as Unix seconds; document it)
-- [ ] Pin the zero-value check: a zero `time.Time` is
+- [x] Pin the zero-value check: a zero `time.Time` is
       `0001-01-01T00:00:00Z`, whose `Unix()` is a large negative number.
       Test the check that actually ships, whichever encoding wins
 
