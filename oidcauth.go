@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/url"
@@ -142,6 +143,8 @@ type Auth struct {
 	forceConsentParams map[string]string
 	extraClaims        []string
 
+	logger *slog.Logger
+
 	now func() time.Time // test hook
 }
 
@@ -155,6 +158,19 @@ func WithSessionTTL(d time.Duration) Option {
 			return errors.New("oidcauth: session TTL must be positive")
 		}
 		a.sessionTTL = d
+		return nil
+	}
+}
+
+// WithLogger sets the logger used for diagnostic messages, such as
+// the reason a session cookie was rejected (logged at debug level).
+// The default discards all output. A nil logger is a config error.
+func WithLogger(l *slog.Logger) Option {
+	return func(a *Auth) error {
+		if l == nil {
+			return errors.New("oidcauth: logger must not be nil")
+		}
+		a.logger = l
 		return nil
 	}
 }
@@ -321,7 +337,8 @@ func New(cfg Config, opts ...Option) (*Auth, error) {
 			"prompt":          "consent", // standard OIDC
 			"approval_prompt": "force",   // pre-OIDC; e.g. Dex <= v2.45.1 honors only this
 		},
-		now: time.Now,
+		logger: slog.New(slog.DiscardHandler),
+		now:    time.Now,
 	}
 	for _, opt := range opts {
 		if err := opt(a); err != nil {

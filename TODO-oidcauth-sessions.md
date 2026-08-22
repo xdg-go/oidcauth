@@ -96,16 +96,16 @@ cookie renews forever.
       Test the check that actually ships, whichever encoding wins
 
 ### 2.2 Fail closed on old cookies
-- [ ] Reject any payload lacking `IssuedAt` (zero value) with the same
+- [x] Reject any payload lacking `IssuedAt` (zero value) with the same
       code path as an invalid signature -- no partial trust
-- [ ] Add a logging seam: the library has no logger today and
+- [x] Add a logging seam: the library has no logger today and
       `errBadCookie` is a single opaque value. Decide `WithLogger(*slog.Logger)`
       plus distinct sentinel errors before writing the rejection path
-- [ ] Log the rejection at debug with a distinguishing reason so a
+- [x] Log the rejection at debug with a distinguishing reason so a
       spike in re-logins is explainable
-- [ ] **Test**: a payload with no `iat` field is rejected
-- [ ] **Test**: a freshly minted cookie is accepted
-- [ ] **Test**: a cookie with a valid signature but tampered `IssuedAt`
+- [x] **Test**: a payload with no `iat` field is rejected
+- [x] **Test**: a freshly minted cookie is accepted
+- [x] **Test**: a cookie with a valid signature but tampered `IssuedAt`
       is rejected (signature covers the whole payload)
 
 ---

@@ -88,6 +88,16 @@ flag; `https://` enables it. Cookies are always `HttpOnly` and
   logout links).
 - Session: HMAC-signed cookie holding the verified claims;
   `WithSessionTTL` configures lifetime (default 24h).
+- **Upgrade note:** session cookies now carry a signed issue time
+  (`iat`), and a cookie without one is rejected rather than partially
+  trusted. Cookies minted by v0.5.0 and earlier have no `iat`, so
+  upgrading logs out every existing user at once; they are redirected
+  through login on their next request. This is deliberate — the
+  library fails closed rather than granting a session it cannot date.
+- `WithLogger(*slog.Logger)` — receives diagnostic messages, such as
+  the reason a session cookie was rejected (logged at debug level, with
+  the failure class only — never a cookie value or user identity). The
+  default discards all output.
 - `ForceApprovalIfNewUser(func(iss, sub string) bool)` — when the
   callback sees an (`iss`, `sub`) pair your app has not recorded, the
   auth request restarts

@@ -1,7 +1,10 @@
 package oidcauth
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -19,6 +22,7 @@ func cookieAuth(secret string) *Auth {
 		secureCookies:     true,
 		sessionCookieName: "_oidcauth",
 		sessionTTL:        time.Hour,
+		logger:            slog.New(slog.DiscardHandler),
 		now:               time.Now,
 	}
 }
@@ -310,5 +314,128 @@ func TestSessionCookieSingleClockReading(t *testing.T) {
 	}
 	if got := s.Expiry.Add(-a.sessionTTL).Unix(); got != s.IssuedAt {
 		t.Errorf("Expiry-TTL = %d, IssuedAt = %d: derived from different clock readings", got, s.IssuedAt)
+	}
+}
+
+// TestSessionIssuedAtRequired covers the fail-closed rule: only a
+// payload carrying a positive "iat" is accepted. Each case mints its
+// own signed cookie, so the signature is always valid and IssuedAt is
+// the only variable.
+func TestSessionIssuedAtRequired(t *testing.T) {
+	mint := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name    string
+		payload string
+		wantErr error
+	}{
+		{
+			name:    "absent iat",
+			payload: `{"user":{"sub":"s1"},"exp":"2026-08-21T13:00:00Z"}`,
+			wantErr: errNoIssuedAt,
+		},
+		{
+			name:    "explicit zero iat",
+			payload: `{"user":{"sub":"s1"},"exp":"2026-08-21T13:00:00Z","iat":0}`,
+			wantErr: errNoIssuedAt,
+		},
+		{
+			name:    "negative iat",
+			payload: `{"user":{"sub":"s1"},"exp":"2026-08-21T13:00:00Z","iat":-1787313600}`,
+			wantErr: errNoIssuedAt,
+		},
+		{
+			name:    "present iat",
+			payload: `{"user":{"sub":"s1"},"exp":"2026-08-21T13:00:00Z","iat":1787313600}`,
+			wantErr: nil,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := cookieAuth(testCookieKey)
+			a.now = func() time.Time { return mint }
+			cookie := &http.Cookie{
+				Name:  a.sessionCookieName,
+				Value: a.sign(purposeSession, []byte(c.payload)),
+			}
+			u, err := a.sessionUser(requestWithCookie(cookie))
+			if !errors.Is(err, c.wantErr) {
+				t.Fatalf("sessionUser err = %v, want %v", err, c.wantErr)
+			}
+			if c.wantErr == nil && u.Sub != "s1" {
+				t.Errorf("user = %+v, want sub s1", u)
+			}
+		})
+	}
+}
+
+// TestFreshSessionCookieAccepted is the positive control for the
+// IssuedAt gate: a cookie minted by the library itself verifies.
+func TestFreshSessionCookieAccepted(t *testing.T) {
+	a := cookieAuth(testCookieKey)
+	mint := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return mint }
+
+	rr := httptest.NewRecorder()
+	a.setSessionCookie(rr, User{Sub: "s1"})
+	c := recordedCookie(t, rr, a.sessionCookieName)
+
+	if _, err := a.sessionUser(requestWithCookie(c)); err != nil {
+		t.Fatalf("freshly minted cookie rejected: %v", err)
+	}
+}
+
+// TestSessionIssuedAtTamperDetected re-signs a payload whose "iat" was
+// edited: the HMAC covers the whole payload, so an attacker who cannot
+// forge it cannot backdate or advance the issue time either.
+func TestSessionIssuedAtTamperDetected(t *testing.T) {
+	a := cookieAuth(testCookieKey)
+	mint := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return mint }
+
+	rr := httptest.NewRecorder()
+	a.setSessionCookie(rr, User{Sub: "s1"})
+	c := recordedCookie(t, rr, a.sessionCookieName)
+
+	payload, err := a.verify(purposeSession, c.Value)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	var s sessionPayload
+	if err := json.Unmarshal(payload, &s); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	s.IssuedAt = mint.Add(-365 * 24 * time.Hour).Unix()
+	tampered, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	// Splice the edited payload in under the ORIGINAL signature.
+	forged := *c
+	forged.Value = base64.RawURLEncoding.EncodeToString(tampered) + c.Value[strings.Index(c.Value, "."):]
+	if _, err := a.sessionUser(requestWithCookie(&forged)); !errors.Is(err, errBadSignature) {
+		t.Errorf("tampered iat: err = %v, want errBadSignature", err)
+	}
+}
+
+// TestCookieRejectionReasonsWrapErrBadCookie keeps the reason
+// sentinels a single external behavior: whatever fails, callers see
+// errBadCookie.
+func TestCookieRejectionReasonsWrapErrBadCookie(t *testing.T) {
+	for _, err := range []error{errNoCookie, errBadSignature, errMalformedPayload, errCorruptPayload, errExpired, errNoIssuedAt} {
+		if !errors.Is(err, errBadCookie) {
+			t.Errorf("%v does not wrap errBadCookie", err)
+		}
+	}
+}
+
+func TestWithLoggerRejectsNil(t *testing.T) {
+	a := cookieAuth(testCookieKey)
+	if err := WithLogger(nil)(a); err == nil {
+		t.Error("WithLogger(nil) accepted")
+	}
+	if err := WithLogger(slog.New(slog.DiscardHandler))(a); err != nil {
+		t.Errorf("WithLogger: %v", err)
 	}
 }
