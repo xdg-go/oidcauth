@@ -18,7 +18,9 @@ func TestOptionSettersApply(t *testing.T) {
 	known := func(string, string) bool { return true }
 	a := &Auth{}
 	opts := []Option{
-		WithSessionTTL(2 * time.Hour),
+		WithSessionLifetime(2 * time.Hour),
+		WithSessionRenewWindow(time.Hour),
+		WithSessionMaxLifetime(48 * time.Hour),
 		WithCookieName("_sess"),
 		WithLoginPath("/in"),
 		WithLogoutPath("/out"),
@@ -33,8 +35,14 @@ func TestOptionSettersApply(t *testing.T) {
 		}
 	}
 
-	if a.sessionTTL != 2*time.Hour {
-		t.Errorf("sessionTTL = %v, want 2h", a.sessionTTL)
+	if a.sessionLifetime != 2*time.Hour {
+		t.Errorf("sessionLifetime = %v, want 2h", a.sessionLifetime)
+	}
+	if a.renewWindow != time.Hour {
+		t.Errorf("renewWindow = %v, want 1h", a.renewWindow)
+	}
+	if a.maxSessionLifetime != 48*time.Hour {
+		t.Errorf("maxSessionLifetime = %v, want 48h", a.maxSessionLifetime)
 	}
 	if a.sessionCookieName != "_sess" {
 		t.Errorf("sessionCookieName = %q, want _sess", a.sessionCookieName)
@@ -86,15 +94,19 @@ func TestOptionSettersCloneInputs(t *testing.T) {
 // validates its input.
 func TestOptionValidation(t *testing.T) {
 	cases := map[string]Option{
-		"zero session TTL":     WithSessionTTL(0),
-		"negative session TTL": WithSessionTTL(-time.Second),
-		"empty cookie name":    WithCookieName(""),
-		"relative login path":  WithLoginPath("in"),
-		"relative logout path": WithLogoutPath("out"),
-		"relative post-logout": WithPostLogoutRedirect("bye"),
-		"nil known func":       ForceApprovalIfNewUser(nil),
-		"empty consent params": WithForceConsentParams(nil),
-		"no extra claim names": WithExtraClaims(),
+		"zero session lifetime":     WithSessionLifetime(0),
+		"negative session lifetime": WithSessionLifetime(-time.Second),
+		"zero max lifetime":         WithSessionMaxLifetime(0),
+		"negative max lifetime":     WithSessionMaxLifetime(-time.Second),
+		"zero renew window":         WithSessionRenewWindow(0),
+		"negative renew window":     WithSessionRenewWindow(-time.Second),
+		"empty cookie name":         WithCookieName(""),
+		"relative login path":       WithLoginPath("in"),
+		"relative logout path":      WithLogoutPath("out"),
+		"relative post-logout":      WithPostLogoutRedirect("bye"),
+		"nil known func":            ForceApprovalIfNewUser(nil),
+		"empty consent params":      WithForceConsentParams(nil),
+		"no extra claim names":      WithExtraClaims(),
 	}
 	for name, opt := range cases {
 		if err := opt(&Auth{}); err == nil {
@@ -196,6 +208,90 @@ func TestNewRejectsBadOption(t *testing.T) {
 	}
 }
 
+// TestNewValidatesSessionLifetimes covers the cross-field rule that
+// only New can enforce: the max lifetime must not be shorter than the
+// session lifetime, whatever order the options arrive in. Equal values are
+// the supported single-TTL configuration.
+func TestNewValidatesSessionLifetimes(t *testing.T) {
+	newWith := func(opts ...Option) (*Auth, error) {
+		return New(Config{
+			Issuer: "https://auth.example.com", ClientID: testClientID, ClientSecret: "test-secret",
+			RedirectURL: testRedirectURL, CookieSecret: testCookieKey,
+		}, opts...)
+	}
+
+	rejected := map[string][]Option{
+		"max below session lifetime": {
+			WithSessionLifetime(48 * time.Hour), WithSessionMaxLifetime(24 * time.Hour),
+		},
+		"max below session lifetime, reversed option order": {
+			WithSessionMaxLifetime(24 * time.Hour), WithSessionLifetime(48 * time.Hour),
+		},
+		"session lifetime above default max": {
+			WithSessionLifetime(1000 * 24 * time.Hour),
+		},
+		"max below default session lifetime": {
+			WithSessionMaxLifetime(time.Hour),
+		},
+		"zero session lifetime":     {WithSessionLifetime(0)},
+		"negative session lifetime": {WithSessionLifetime(-time.Second)},
+		"zero max lifetime":         {WithSessionMaxLifetime(0)},
+		"negative max lifetime":     {WithSessionMaxLifetime(-time.Second)},
+		"zero renew window":         {WithSessionRenewWindow(0)},
+		"negative renew window":     {WithSessionRenewWindow(-time.Second)},
+		"renew window above session lifetime": {
+			WithSessionLifetime(24 * time.Hour), WithSessionRenewWindow(48 * time.Hour),
+		},
+		"renew window above session lifetime, reversed option order": {
+			WithSessionRenewWindow(48 * time.Hour), WithSessionLifetime(24 * time.Hour),
+		},
+		"session lifetime below default renew window": {
+			WithSessionLifetime(time.Hour),
+		},
+		"renew window above default session lifetime": {
+			WithSessionRenewWindow(1000 * 24 * time.Hour),
+		},
+	}
+	for name, opts := range rejected {
+		if _, err := newWith(opts...); err == nil {
+			t.Errorf("%s: New succeeded, want config error", name)
+		}
+	}
+
+	// max lifetime == session lifetime is the single-TTL configuration.
+	a, err := newWith(WithSessionLifetime(24*time.Hour), WithSessionRenewWindow(12*time.Hour), WithSessionMaxLifetime(24*time.Hour))
+	if err != nil {
+		t.Fatalf("New with max lifetime == session lifetime: %v", err)
+	}
+	if a.sessionLifetime != 24*time.Hour || a.maxSessionLifetime != 24*time.Hour {
+		t.Errorf("sessionLifetime = %v, maxSessionLifetime = %v; want both 24h", a.sessionLifetime, a.maxSessionLifetime)
+	}
+
+	// Defaults must satisfy the same rule.
+	a, err = newWith()
+	if err != nil {
+		t.Fatalf("New with defaults: %v", err)
+	}
+	if a.sessionLifetime != 90*24*time.Hour || a.maxSessionLifetime != 365*24*time.Hour {
+		t.Errorf("defaults: sessionLifetime = %v, maxSessionLifetime = %v; want 90d and 365d", a.sessionLifetime, a.maxSessionLifetime)
+	}
+	if a.renewWindow != 45*24*time.Hour {
+		t.Errorf("defaults: renewWindow = %v, want 45d", a.renewWindow)
+	}
+
+	// renew window == session lifetime is the renew-on-every-request
+	// configuration, and the full ordering may be pinned at one point.
+	a, err = newWith(
+		WithSessionRenewWindow(24*time.Hour), WithSessionLifetime(24*time.Hour), WithSessionMaxLifetime(24*time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("New with renew window == session lifetime: %v", err)
+	}
+	if a.renewWindow != 24*time.Hour {
+		t.Errorf("renewWindow = %v, want 24h", a.renewWindow)
+	}
+}
+
 // TestNewIsOffline proves construction needs no network: with an
 // unreachable issuer, New succeeds and the discovery-free surface —
 // session read via User, session clear via ClearSession — works.
@@ -218,7 +314,9 @@ func TestNewIsOffline(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(cookies[0])
-	u, ok := a.User(req)
+	s, err2 := a.sessionFromRequestAt(req, a.now())
+	u := s.User
+	ok := err2 == nil
 	if !ok || u.Sub != "u1" || u.Issuer != "https://idp.example.com" {
 		t.Errorf("User = %+v, %v; want u1 session, true", u, ok)
 	}

@@ -18,12 +18,14 @@ import (
 // skipping OIDC discovery.
 func cookieAuth(secret string) *Auth {
 	return &Auth{
-		cookieSecret:      []byte(secret),
-		secureCookies:     true,
-		sessionCookieName: "_oidcauth",
-		sessionTTL:        time.Hour,
-		logger:            slog.New(slog.DiscardHandler),
-		now:               time.Now,
+		cookieSecret:       []byte(secret),
+		secureCookies:      true,
+		sessionCookieName:  "_oidcauth",
+		sessionLifetime:    time.Hour,
+		renewWindow:        30 * time.Minute,
+		maxSessionLifetime: 24 * time.Hour,
+		logger:             slog.New(slog.DiscardHandler),
+		now:                time.Now,
 	}
 }
 
@@ -49,10 +51,11 @@ func TestSessionCookieRoundTrip(t *testing.T) {
 	if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteLaxMode {
 		t.Errorf("cookie flags: HttpOnly=%v Secure=%v SameSite=%v", c.HttpOnly, c.Secure, c.SameSite)
 	}
-	got, err := a.sessionUser(requestWithCookie(c))
+	s, err := a.sessionFromRequestAt(requestWithCookie(c), a.now())
 	if err != nil {
-		t.Fatalf("sessionUser: %v", err)
+		t.Fatalf("sessionFromRequestAt: %v", err)
 	}
+	got := s.User
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
@@ -81,7 +84,7 @@ func TestSessionCookieTamperDetected(t *testing.T) {
 	} else {
 		mutated.Value = "A" + mutated.Value[1:]
 	}
-	if _, err := a.sessionUser(requestWithCookie(&mutated)); err == nil {
+	if _, err := a.sessionFromRequestAt(requestWithCookie(&mutated), a.now()); err == nil {
 		t.Errorf("tampered cookie accepted")
 	}
 
@@ -93,7 +96,7 @@ func TestSessionCookieTamperDetected(t *testing.T) {
 	} {
 		mutated := *c
 		mutated.Value = mangle(c.Value)
-		if _, err := a.sessionUser(requestWithCookie(&mutated)); err == nil {
+		if _, err := a.sessionFromRequestAt(requestWithCookie(&mutated), a.now()); err == nil {
 			t.Errorf("%s: mangled cookie accepted", name)
 		}
 	}
@@ -107,7 +110,7 @@ func TestSessionCookieSignedGarbageRejected(t *testing.T) {
 		Name:  a.sessionCookieName,
 		Value: a.sign(purposeSession, []byte("not json")),
 	}
-	if _, err := a.sessionUser(requestWithCookie(c)); err == nil {
+	if _, err := a.sessionFromRequestAt(requestWithCookie(c), a.now()); err == nil {
 		t.Error("signed non-JSON payload accepted")
 	}
 }
@@ -119,7 +122,7 @@ func TestSessionCookieWrongKeyRejected(t *testing.T) {
 	c := recordedCookie(t, rr, a.sessionCookieName)
 
 	other := cookieAuth("ffffffffffffffffffffffffffffffff")
-	if _, err := other.sessionUser(requestWithCookie(c)); err == nil {
+	if _, err := other.sessionFromRequestAt(requestWithCookie(c), other.now()); err == nil {
 		t.Errorf("cookie signed with different key accepted")
 	}
 }
@@ -130,8 +133,8 @@ func TestSessionCookieExpiryEnforced(t *testing.T) {
 	a.setSessionCookie(rr, User{Sub: "s1"})
 	c := recordedCookie(t, rr, a.sessionCookieName)
 
-	a.now = func() time.Time { return time.Now().Add(a.sessionTTL + time.Minute) }
-	if _, err := a.sessionUser(requestWithCookie(c)); err == nil {
+	a.now = func() time.Time { return time.Now().Add(a.sessionLifetime + time.Minute) }
+	if _, err := a.sessionFromRequestAt(requestWithCookie(c), a.now()); err == nil {
 		t.Errorf("expired session accepted")
 	}
 }
@@ -145,7 +148,7 @@ func TestPurposeSeparation(t *testing.T) {
 	stateC := recordedCookie(t, rr, a.stateCookieName())
 
 	forged := &http.Cookie{Name: a.sessionCookieName, Value: stateC.Value}
-	if _, err := a.sessionUser(requestWithCookie(forged)); err == nil {
+	if _, err := a.sessionFromRequestAt(requestWithCookie(forged), a.now()); err == nil {
 		t.Errorf("state cookie accepted as session cookie")
 	}
 }
@@ -312,7 +315,7 @@ func TestSessionCookieSingleClockReading(t *testing.T) {
 	if err := json.Unmarshal(payload, &s); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got := s.Expiry.Add(-a.sessionTTL).Unix(); got != s.IssuedAt {
+	if got := s.Expiry.Add(-a.sessionLifetime).Unix(); got != s.IssuedAt {
 		t.Errorf("Expiry-TTL = %d, IssuedAt = %d: derived from different clock readings", got, s.IssuedAt)
 	}
 }
@@ -358,10 +361,11 @@ func TestSessionIssuedAtRequired(t *testing.T) {
 				Name:  a.sessionCookieName,
 				Value: a.sign(purposeSession, []byte(c.payload)),
 			}
-			u, err := a.sessionUser(requestWithCookie(cookie))
+			s, err := a.sessionFromRequestAt(requestWithCookie(cookie), mint)
 			if !errors.Is(err, c.wantErr) {
-				t.Fatalf("sessionUser err = %v, want %v", err, c.wantErr)
+				t.Fatalf("sessionFromRequestAt err = %v, want %v", err, c.wantErr)
 			}
+			u := s.User
 			if c.wantErr == nil && u.Sub != "s1" {
 				t.Errorf("user = %+v, want sub s1", u)
 			}
@@ -380,7 +384,7 @@ func TestFreshSessionCookieAccepted(t *testing.T) {
 	a.setSessionCookie(rr, User{Sub: "s1"})
 	c := recordedCookie(t, rr, a.sessionCookieName)
 
-	if _, err := a.sessionUser(requestWithCookie(c)); err != nil {
+	if _, err := a.sessionFromRequestAt(requestWithCookie(c), mint); err != nil {
 		t.Fatalf("freshly minted cookie rejected: %v", err)
 	}
 }
@@ -414,7 +418,7 @@ func TestSessionIssuedAtTamperDetected(t *testing.T) {
 	// Splice the edited payload in under the ORIGINAL signature.
 	forged := *c
 	forged.Value = base64.RawURLEncoding.EncodeToString(tampered) + c.Value[strings.Index(c.Value, "."):]
-	if _, err := a.sessionUser(requestWithCookie(&forged)); !errors.Is(err, errBadSignature) {
+	if _, err := a.sessionFromRequestAt(requestWithCookie(&forged), mint); !errors.Is(err, errBadSignature) {
 		t.Errorf("tampered iat: err = %v, want errBadSignature", err)
 	}
 }
@@ -437,5 +441,55 @@ func TestWithLoggerRejectsNil(t *testing.T) {
 	}
 	if err := WithLogger(slog.New(slog.DiscardHandler))(a); err != nil {
 		t.Errorf("WithLogger: %v", err)
+	}
+}
+
+// TestRenewSessionCookieWindow pins the renewal trigger to the renew
+// window: a request renews only once it lands within renewWindow of the
+// cookie's expiry. The default case is the default window, spelled
+// out rather than derived.
+func TestRenewSessionCookieWindow(t *testing.T) {
+	issued := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name        string
+		lifetime    time.Duration
+		renewWindow time.Duration
+		elapsed     time.Duration // since the cookie was written
+		wantRenew   bool
+	}{
+		{"default window, just outside the renew window", 90 * 24 * time.Hour, 45 * 24 * time.Hour, 45*24*time.Hour - time.Second, false},
+		{"default window, at the renew window boundary", 90 * 24 * time.Hour, 45 * 24 * time.Hour, 45 * 24 * time.Hour, true},
+		{"custom window, just before its boundary", 90 * 24 * time.Hour, 24 * time.Hour, 89*24*time.Hour - time.Second, false},
+		{"custom window, at its boundary", 90 * 24 * time.Hour, 24 * time.Hour, 89 * 24 * time.Hour, true},
+		{"window == lifetime, one second in", 90 * 24 * time.Hour, 90 * 24 * time.Hour, time.Second, true},
+		{"window == lifetime, mid-life", 90 * 24 * time.Hour, 90 * 24 * time.Hour, 30 * 24 * time.Hour, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := cookieAuth(testCookieKey)
+			a.sessionLifetime = tc.lifetime
+			a.renewWindow = tc.renewWindow
+			a.maxSessionLifetime = 365 * 24 * time.Hour
+
+			s := sessionPayload{
+				User:     User{Sub: "s1"},
+				IssuedAt: issued.Unix(),
+				Expiry:   issued.Add(tc.lifetime),
+			}
+			now := issued.Add(tc.elapsed)
+
+			rr := httptest.NewRecorder()
+			a.renewSessionCookie(rr, s, now)
+			var got bool
+			for _, c := range rr.Result().Cookies() {
+				if c.Name == a.sessionCookieName {
+					got = true
+				}
+			}
+			if got != tc.wantRenew {
+				t.Errorf("renewed = %v, want %v", got, tc.wantRenew)
+			}
+		})
 	}
 }

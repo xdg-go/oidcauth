@@ -169,10 +169,11 @@ func TestCallbackHappyPath(t *testing.T) {
 	if sc == nil {
 		t.Fatalf("callback set no session cookie")
 	}
-	u, err := a.sessionUser(requestWithCookie(sc))
+	s, err := a.sessionFromRequestAt(requestWithCookie(sc), a.now())
 	if err != nil {
 		t.Fatalf("session unreadable: %v", err)
 	}
+	u := s.User
 	want := User{Issuer: idp.srv.URL, Sub: "test-sub-1", Email: "user@example.com", EmailVerified: true, Name: "Test User"}
 	if !reflect.DeepEqual(u, want) {
 		t.Errorf("session user = %+v, want %+v", u, want)
@@ -543,10 +544,11 @@ func TestWithExtraClaims(t *testing.T) {
 	if sc == nil {
 		t.Fatalf("callback set no session cookie")
 	}
-	u, err := a.sessionUser(requestWithCookie(sc))
+	s, err := a.sessionFromRequestAt(requestWithCookie(sc), a.now())
 	if err != nil {
 		t.Fatalf("session unreadable: %v", err)
 	}
+	u := s.User
 	var groups []string
 	if err := json.Unmarshal(u.Extra["groups"], &groups); err != nil {
 		t.Fatalf("Extra[groups] = %s: %v", u.Extra["groups"], err)

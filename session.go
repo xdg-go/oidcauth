@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -40,11 +41,12 @@ var errBadCookie = errors.New("oidcauth: invalid or expired cookie")
 // Rejection reasons. Each wraps errBadCookie so that external
 // behavior is one error, while logs can name what actually failed.
 var (
-	errNoCookie         = fmt.Errorf("%w: no cookie present", errBadCookie)
-	errBadSignature     = fmt.Errorf("%w: bad signature", errBadCookie)
-	errMalformedPayload = fmt.Errorf("%w: malformed payload", errBadCookie)
-	errExpired          = fmt.Errorf("%w: expired", errBadCookie)
-	errNoIssuedAt       = fmt.Errorf("%w: no issue time", errBadCookie)
+	errNoCookie           = fmt.Errorf("%w: no cookie present", errBadCookie)
+	errBadSignature       = fmt.Errorf("%w: bad signature", errBadCookie)
+	errMalformedPayload   = fmt.Errorf("%w: malformed payload", errBadCookie)
+	errExpired            = fmt.Errorf("%w: expired", errBadCookie)
+	errNoIssuedAt         = fmt.Errorf("%w: no issue time", errBadCookie)
+	errMaxLifetimeReached = fmt.Errorf("%w: max lifetime reached", errBadCookie)
 
 	// errCorruptPayload is the highest-signal reason: the payload
 	// carried a valid MAC yet did not decode. Nothing an outsider can
@@ -131,8 +133,23 @@ func (a *Auth) stateCookieName() string { return a.sessionCookieName + "_state" 
 
 func (a *Auth) setSessionCookie(w http.ResponseWriter, u User) {
 	now := a.now()
-	exp := now.Add(a.sessionTTL)
-	payload, _ := json.Marshal(sessionPayload{User: u, Expiry: exp, IssuedAt: now.Unix()})
+	a.writeSessionCookie(w, u, now.Unix(), now.Add(a.sessionLifetime))
+}
+
+// writeSessionCookie signs and writes one session cookie with the
+// given issue time and expiry. Renewal reuses it with the original
+// IssuedAt so the max lifetime keeps counting from first login.
+//
+// The expiry is truncated to whole seconds so it shares one time grid
+// with IssuedAt, which is Unix seconds. Without that, an expiry
+// carrying sub-second precision could sit a fraction past a max
+// lifetime deadline computed from IssuedAt, and renewal's "already at
+// the max" guard would skip the clamping rewrite, leaving a cookie
+// advertising an expiry the server would refuse to honor.
+func (a *Auth) writeSessionCookie(w http.ResponseWriter, u User, issuedAt int64, exp time.Time) {
+	exp = exp.Truncate(time.Second)
+	payload, _ := json.Marshal(sessionPayload{User: u, Expiry: exp, IssuedAt: issuedAt})
+	a.dropPendingSessionCookie(w)
 	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for http://localhost dev)
 		Name:     a.sessionCookieName,
 		Value:    a.sign(purposeSession, payload),
@@ -144,7 +161,47 @@ func (a *Auth) setSessionCookie(w http.ResponseWriter, u User) {
 	})
 }
 
+// dropPendingSessionCookie removes any Set-Cookie header already
+// queued for the session cookie, so the last writer wins outright
+// instead of relying on the browser to prefer the last of two
+// same-name cookies. Renewal writes at middleware entry, so a handler
+// that then mints or clears the session would otherwise emit two.
+// Matching is by cookie name only, so a handler's own Set-Cookie
+// reusing the session cookie name under a different Path or Domain is
+// dropped too (see the README). Cookies under any other name,
+// including the state cookie, are left alone.
+func (a *Auth) dropPendingSessionCookie(w http.ResponseWriter) {
+	pending := w.Header()["Set-Cookie"]
+	kept := pending[:0]
+	for _, v := range pending {
+		if setCookieName(v) != a.sessionCookieName {
+			kept = append(kept, v)
+		}
+	}
+	if len(kept) == 0 {
+		w.Header().Del("Set-Cookie")
+		return
+	}
+	w.Header()["Set-Cookie"] = kept
+}
+
+// setCookieName returns the cookie name from a Set-Cookie header
+// value, i.e. the part before the first "=" of the first
+// semicolon-separated attribute. It returns "" if the value has no
+// name=value pair.
+func setCookieName(value string) string {
+	if i := strings.IndexByte(value, ';'); i >= 0 {
+		value = value[:i]
+	}
+	i := strings.IndexByte(value, '=')
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(value[:i])
+}
+
 func (a *Auth) clearSessionCookie(w http.ResponseWriter) {
+	a.dropPendingSessionCookie(w)
 	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for http://localhost dev)
 		Name:     a.sessionCookieName,
 		Value:    "",
@@ -156,37 +213,78 @@ func (a *Auth) clearSessionCookie(w http.ResponseWriter) {
 	})
 }
 
-// sessionUser returns the verified user from the request's session
-// cookie, or an error if the cookie is absent, tampered, or expired.
-func (a *Auth) sessionUser(r *http.Request) (User, error) {
+// sessionFromRequestAt returns the whole verified payload from the
+// request's session cookie, or an error if the cookie is absent,
+// tampered, expired, or past the max lifetime. The current time is
+// supplied by the caller, so a caller that also has to decide about
+// renewal reads the clock exactly once for the whole request. Every
+// rejection reason lives here, so renewal can never act on a session
+// the verify path would refuse.
+func (a *Auth) sessionFromRequestAt(r *http.Request, now time.Time) (sessionPayload, error) {
 	c, err := r.Cookie(a.sessionCookieName)
 	if err != nil {
 		// Not logged: an absent session cookie is every anonymous
 		// request, and logging it would bury the reasons that carry
 		// diagnostic value.
-		return User{}, errNoCookie
+		return sessionPayload{}, errNoCookie
 	}
 	payload, err := a.verify(purposeSession, c.Value)
 	if err != nil {
-		return User{}, a.rejectCookie(purposeSession, err)
+		return sessionPayload{}, a.rejectCookie(purposeSession, err)
 	}
 	var s sessionPayload
 	if err := json.Unmarshal(payload, &s); err != nil {
-		return User{}, a.rejectCookie(purposeSession, errCorruptPayload)
+		return sessionPayload{}, a.rejectCookie(purposeSession, errCorruptPayload)
 	}
 	// Fail closed: a payload minted before IssuedAt existed (or with
 	// the field stripped) decodes to 0 and gets no partial trust. A
 	// negative value is equally rejected: it is unreachable while the
 	// field is HMAC-covered and only ever set from now.Unix(), but an
-	// absolute-lifetime check computed from it would otherwise never
+	// max-lifetime check computed from it would otherwise never
 	// expire.
 	if s.IssuedAt <= 0 {
-		return User{}, a.rejectCookie(purposeSession, errNoIssuedAt)
+		return sessionPayload{}, a.rejectCookie(purposeSession, errNoIssuedAt)
 	}
-	if !a.now().Before(s.Expiry) {
-		return User{}, a.rejectCookie(purposeSession, errExpired)
+	if !now.Before(s.Expiry) {
+		return sessionPayload{}, a.rejectCookie(purposeSession, errExpired)
 	}
-	return s.User, nil
+	// The max lifetime is enforced on every verify, renewing or not,
+	// so a cookie still inside its own session lifetime dies at the
+	// max.
+	if !now.Before(a.maxLifetimeDeadline(s)) {
+		return sessionPayload{}, a.rejectCookie(purposeSession, errMaxLifetimeReached)
+	}
+	return s, nil
+}
+
+// maxLifetimeDeadline is the instant a session dies no matter how
+// active the user is: its original issue time plus the max lifetime.
+func (a *Auth) maxLifetimeDeadline(s sessionPayload) time.Time {
+	return time.Unix(s.IssuedAt, 0).Add(a.maxSessionLifetime)
+}
+
+// renewSessionCookie re-issues s when now has reached the renew window
+// before its expiry (Expiry - renewWindow), preserving the
+// original IssuedAt. The new expiry is clamped to the max lifetime,
+// so the cookie never advertises a lifetime the server would refuse
+// to honor. Callers must pass a payload that already verified, along
+// with the same now that verified it.
+func (a *Auth) renewSessionCookie(w http.ResponseWriter, s sessionPayload, now time.Time) {
+	if now.Before(s.Expiry.Add(-a.renewWindow)) {
+		return
+	}
+	exp := now.Add(a.sessionLifetime)
+	if maxAt := a.maxLifetimeDeadline(s); exp.After(maxAt) {
+		exp = maxAt
+	}
+	// Near the max lifetime the clamp above pins the expiry at the
+	// deadline; later renewals compute that same expiry. Rewriting an
+	// expiry that is not later than the current one buys nothing, so
+	// skip it.
+	if !exp.After(s.Expiry) {
+		return
+	}
+	a.writeSessionCookie(w, s.User, s.IssuedAt, exp)
 }
 
 func (a *Auth) setStateCookie(w http.ResponseWriter, s statePayload) {

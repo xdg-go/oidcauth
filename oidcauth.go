@@ -1,18 +1,79 @@
 // Package oidcauth provides OIDC login for Go web apps using only
-// net/http. It is a thin wrapper over github.com/coreos/go-oidc/v3 and
-// golang.org/x/oauth2 that handles the authorization-code flow with PKCE
-// (S256), state and nonce validation, and a signed session cookie.
+// net/http: authorization-code flow with PKCE, state and nonce
+// validation, and the verified identity in an HMAC-signed cookie. It
+// wraps github.com/coreos/go-oidc/v3 and golang.org/x/oauth2 and works
+// with any conformant issuer.
 //
-// It targets any conformant OIDC issuer; nothing in this package is
-// specific to a particular identity provider.
+// # Identity
 //
-// # Identity rule: key on sub, never on email
+// Key accounts on (iss, sub). Never key on email, and never link
+// accounts because emails match.
 //
-// Apps must key user accounts on the ID token's `sub` claim, never on
-// email. OIDC guarantees `sub` is unique per issuer and never reassigned;
-// it guarantees nothing about email. Emails are mutable and reassignable.
-// Store email alongside `sub` for display and migration, but only `sub`
-// is the key. See the README for the full rationale.
+// sub is unique and permanent within an issuer. Email is none of those:
+// users change it, providers recycle it, and some issuers emit it
+// unverified or attacker-chosen (the "nOAuth" attack). A second
+// connector can present the same email under a different sub. Store
+// email beside the pair for display and recovery; let it suggest a
+// link only when the user proves it, e.g. by a verification challenge.
+//
+// sub is opaque and stable only within an issuer. Replacing the issuer
+// implementation, or how it authenticates upstream, can change every
+// sub behind an unchanged URL. Before such a migration, store a durable
+// upstream identity (via [WithExtraClaims]) or accept email as the
+// mapping key under the rule above.
+//
+// # Middleware
+//
+// Wrap the whole tree in [Auth.Authenticate]; gate routes with
+// [Auth.RequireAuth]. Authenticate verifies once per request, never
+// rejects, and renews the cookie. RequireAuth reuses that result, or
+// verifies inline when no Authenticate ran. Either way the cookie is
+// checked exactly once.
+//
+// Only Authenticate renews. Mount at least one in the user's normal
+// browsing path, or sessions expire a full lifetime after login no
+// matter how active the user is. Nesting cannot turn renewal off: the
+// strongest mount covering a route decides, and a response never
+// carries two session cookies.
+//
+// One *Auth per process; see [UserFromContext].
+//
+// # Session lifetime
+//
+// Two deadlines, both checked on every verify; the first one reached
+// ends the session.
+//
+//   - [WithSessionLifetime] (90d) counts from the last cookie write and
+//     slides: a request within [WithSessionRenewWindow] (45d) of expiry
+//     re-issues the cookie.
+//   - [WithSessionMaxLifetime] (365d) counts from first login for a cookie
+//     and never moves. Renewal will not extend a session past max lifetime.
+//
+// Renewal extends cookie expiration.  It does not re-authentication. Claims
+// freeze at login, so a user disabled at the provider keeps a valid session
+// until the max lifetime.
+//
+// [New] requires renew window <= lifetime <= max lifetime and fails
+// rather than substituting defaults.
+//
+// Before writing the session cookie the package drops any queued
+// Set-Cookie of the same name, so the last writer wins. Matching
+// ignores Path and Domain; a handler clearing a legacy Domain= copy of
+// the same name in the same response loses that write.
+//
+// # Issuer availability
+//
+// [New] does no I/O. Discovery runs on the first login and retries
+// with a cooldown. Session verification uses CookieSecret, not the
+// issuer's keys, so existing sessions survive an issuer outage; new
+// logins return 503 until discovery succeeds. [Auth.Connect] makes
+// startup fail instead.
+//
+// # Logout
+//
+// [Auth.LogoutHandler] is POST-only and clears only the app cookie; the
+// issuer's session is untouched. [Auth.ClearSession] does the same from
+// inside your own handler.
 package oidcauth
 
 import (
@@ -131,8 +192,10 @@ type Auth struct {
 	cookieSecret  []byte
 	secureCookies bool
 
-	sessionCookieName string
-	sessionTTL        time.Duration
+	sessionCookieName  string
+	sessionLifetime    time.Duration
+	renewWindow        time.Duration
+	maxSessionLifetime time.Duration
 
 	loginPath    string
 	callbackPath string
@@ -151,13 +214,78 @@ type Auth struct {
 // Option customizes an [Auth].
 type Option func(*Auth) error
 
-// WithSessionTTL sets the app session lifetime (default 24h).
-func WithSessionTTL(d time.Duration) Option {
+// WithSessionLifetime sets how long a session cookie lives from each
+// time it is written (default 90 days). The deadline slides forward
+// whenever [Auth.Authenticate] renews the cookie, which it does on the
+// first request arriving within the renew window before the expiry
+// (see [WithSessionRenewWindow], default 45 days), so an active user
+// keeps moving the deadline while an idle one expires somewhere
+// between one renew window and a full lifetime after their last
+// request -- sooner if the max lifetime cuts it short: that request
+// either renewed the cookie, setting the expiry a full lifetime out,
+// or left an expiry still more than a renew window away. Must be positive, must not be shorter than the renew
+// window, and must not exceed the maximum set by
+// [WithSessionMaxLifetime]; since that maximum defaults to 365 days, a
+// lifetime longer than 365 days fails construction even if the maximum
+// was never set explicitly. Since the renew window defaults to 45
+// days, a lifetime shorter than 45 days fails construction unless
+// [WithSessionRenewWindow] is set too.
+func WithSessionLifetime(d time.Duration) Option {
 	return func(a *Auth) error {
 		if d <= 0 {
-			return errors.New("oidcauth: session TTL must be positive")
+			return errors.New("oidcauth: session lifetime must be positive")
 		}
-		a.sessionTTL = d
+		a.sessionLifetime = d
+		return nil
+	}
+}
+
+// WithSessionRenewWindow sets how long before a session cookie's expiry
+// an arriving request triggers renewal (default 45 days). While a
+// request lands outside the window [Auth.Authenticate] leaves the
+// cookie alone; the first request inside it re-issues the cookie with
+// a fresh lifetime. At the defaults (90-day lifetime, 45-day window)
+// renewal fires 45 days after the cookie was written.
+//
+// Setting the window equal to the session lifetime renews on every
+// request, which is the true last-request idle timeout: the deadline
+// always sits exactly one lifetime after the user's most recent
+// request. Until the max lifetime tail described below, it costs a
+// Set-Cookie on every authenticated response.
+//
+// As a session approaches the max lifetime, a renewal's new expiry is
+// clamped to the max lifetime deadline. Once the expiry is pinned
+// there, any later renewal computes the same expiry and skips the
+// rewrite, so the tail costs at most one extra cookie write and never
+// pushes a session past the max.
+//
+// Must be positive and must not exceed the session lifetime.
+func WithSessionRenewWindow(d time.Duration) Option {
+	return func(a *Auth) error {
+		if d <= 0 {
+			return errors.New("oidcauth: session renew window must be positive")
+		}
+		a.renewWindow = d
+		return nil
+	}
+}
+
+// WithSessionMaxLifetime sets how long a session may live from the
+// original login (default 365 days). This deadline never moves:
+// renewal preserves the original issue time, so no amount of activity
+// pushes a session past it. It is enforced on every verify, so a
+// cookie still inside its own lifetime is rejected once it reaches the
+// maximum, exactly as an expired one is; a renewed cookie's expiry is
+// clamped to it as well. The deadline is computed from the issue time
+// stored in each cookie, so lowering it applies to sessions already
+// minted. Must be positive and must not be shorter than the session
+// lifetime.
+func WithSessionMaxLifetime(d time.Duration) Option {
+	return func(a *Auth) error {
+		if d <= 0 {
+			return errors.New("oidcauth: session max lifetime must be positive")
+		}
+		a.maxSessionLifetime = d
 		return nil
 	}
 }
@@ -290,6 +418,11 @@ const httpTimeout = 10 * time.Second
 // hard-down issuer is not re-probed once per request.
 const discoveryCooldown = 2 * time.Second
 
+// defaultRenewWindow is how long before expiry an arriving request
+// renews the session cookie unless [WithSessionRenewWindow] says
+// otherwise.
+const defaultRenewWindow = 45 * 24 * time.Hour
+
 // NewFromEnv is shorthand for [FromEnv] followed by [New].
 func NewFromEnv(opts ...Option) (*Auth, error) {
 	cfg, err := FromEnv()
@@ -328,7 +461,9 @@ func New(cfg Config, opts ...Option) (*Auth, error) {
 		cookieSecret:       []byte(cfg.CookieSecret),
 		secureCookies:      secure,
 		sessionCookieName:  "_oidcauth",
-		sessionTTL:         24 * time.Hour,
+		sessionLifetime:    90 * 24 * time.Hour,
+		renewWindow:        defaultRenewWindow,
+		maxSessionLifetime: 365 * 24 * time.Hour,
 		loginPath:          "/auth/login",
 		callbackPath:       callbackPath,
 		logoutPath:         "/auth/logout",
@@ -344,6 +479,17 @@ func New(cfg Config, opts ...Option) (*Auth, error) {
 		if err := opt(a); err != nil {
 			return nil, err
 		}
+	}
+	// Cross-field checks: options may arrive in any order, so the
+	// relative ordering renew window <= session lifetime <= max
+	// lifetime can only be judged once all of them have been applied.
+	if a.renewWindow > a.sessionLifetime {
+		return nil, fmt.Errorf("oidcauth: session renew window (%v) must not exceed the session lifetime (%v); set WithSessionRenewWindow when shortening the session lifetime",
+			a.renewWindow, a.sessionLifetime)
+	}
+	if a.maxSessionLifetime < a.sessionLifetime {
+		return nil, fmt.Errorf("oidcauth: session max lifetime (%v) must not be shorter than the session lifetime (%v)",
+			a.maxSessionLifetime, a.sessionLifetime)
 	}
 	return a, nil
 }
