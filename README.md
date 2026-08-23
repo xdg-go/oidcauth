@@ -2,27 +2,28 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/xdg-go/oidcauth.svg)](https://pkg.go.dev/github.com/xdg-go/oidcauth)
 
-OIDC login for Go web apps using only `net/http`. A thin wrapper over
+OIDC login for Go web apps using only `net/http`. oidcauth wraps
 [go-oidc](https://github.com/coreos/go-oidc) and `golang.org/x/oauth2`
-that handles the authorization-code flow with PKCE (S256), state and
-nonce validation, and a signed session cookie. It works with any
-conformant OIDC issuer; nothing here is provider-specific.
+to run the authorization-code flow with PKCE, validate state and
+nonce, and keep the verified identity in an HMAC-signed cookie. It
+works with any conformant OIDC issuer.
+
+What it is not: an OAuth client for calling APIs on the user's
+behalf, a general session store, or a token-refresh manager. It logs
+a user in and tells your handlers who they are.
+
+## Install
 
 ```
 go get github.com/xdg-go/oidcauth
 ```
 
-## Usage
+## Quick start
 
 ```go
 func main() {
 	auth, err := oidcauth.NewFromEnv()
 	if err != nil {
-		log.Fatal(err)
-	}
-	// Optional: fail startup if the issuer is unreachable. Without
-	// this, discovery happens lazily on the first login.
-	if err := auth.Connect(context.Background()); err != nil {
 		log.Fatal(err)
 	}
 
@@ -35,118 +36,95 @@ func main() {
 			fmt.Fprintf(w, "hello %s (%s)", user.Name, user.Sub)
 		})))
 
-	log.Fatal(http.ListenAndServe(":8083", mux))
+	log.Fatal(http.ListenAndServe(":8083", auth.Authenticate(mux)))
 }
 ```
 
-## Environment variables
+`NewFromEnv` reads:
 
 | Variable | Meaning |
 |---|---|
 | `AUTH_ISSUER` | OIDC issuer URL, e.g. `https://auth.example.com` |
-| `AUTH_CLIENT_ID` | OAuth2 client id (also the expected ID-token `aud`) |
+| `AUTH_CLIENT_ID` | OAuth2 client id |
 | `AUTH_CLIENT_SECRET` | OAuth2 client secret |
-| `AUTH_REDIRECT_URL` | Absolute callback URL; its path is where the callback handler mounts. Convention: `https://<domain>/auth/callback` |
-| `AUTH_COOKIE_SECRET` | HMAC key for cookies, ≥32 bytes (`openssl rand -hex 32`) |
+| `AUTH_REDIRECT_URL` | Absolute callback URL, e.g. `https://app.example.com/auth/callback` |
+| `AUTH_COOKIE_SECRET` | HMAC key for cookies, at least 32 bytes (`openssl rand -hex 32`) |
 
-An `http://` redirect URL (local dev) disables the cookie `Secure`
-flag; `https://` enables it. Cookies are always `HttpOnly` and
-`SameSite=Lax`.
+An `http://` redirect URL (local dev) turns off the cookie `Secure`
+flag. Use `oidcauth.New(cfg, opts...)` to configure from code.
 
-## What it provides
+## Guide
 
-- `LoginHandler` — starts the flow: PKCE S256, random `state` bound to
-  a signed short-lived cookie, `nonce` carried into the ID token.
-  Accepts `?next=/relative/path` for post-login redirect (open
-  redirects are rejected).
-- `CallbackHandler` — verifies state, exchanges the code (with the
-  PKCE verifier), verifies the ID token (issuer, audience, expiry,
-  signature via provider JWKS — all delegated to go-oidc) and the
-  nonce, then sets the session cookie.
-- `LogoutHandler` — clears the app session cookie only. The issuer's
-  session and any upstream (e.g. Google) consent are untouched.
-  POST-only, to prevent CSRF-forced logout; drive it from a form or a
-  `fetch` POST, not a link.
-- `ClearSession` — ends the session from inside your own handler
-  (e.g. account deletion), where redirecting the in-flight POST to the
-  POST-only logout endpoint is not possible.
-- Lazy connection — `New` performs no I/O; OIDC discovery runs on
-  demand from the login and callback handlers (one attempt at a time,
-  with a short cooldown after failure), so your app starts even while
-  the issuer is down. Session verification is anchored in your
-  `CookieSecret` (HMAC), not the issuer's keys, so existing sessions
-  keep working through an issuer outage; only new logins depend on the
-  issuer, and they return 503 until discovery succeeds. `Connect` makes
-  discovery eager for apps that want startup to fail on a bad issuer.
-- `RequireAuth` middleware + `UserFromContext` — gate handlers and
-  read the verified `iss`, `sub`, `email`, `email_verified`, `name`.
-- `WithExtraClaims("claim", ...)` — carry additional ID-token claims
-  into the session, raw, on `User.Extra`. Useful when your issuer
-  emits nonstandard claims apps need at login (e.g. a broker's
-  upstream-identity claims — see the migration caveat below).
-- `Auth.User(r)` — optional-auth check for public pages (login vs
-  logout links).
-- Session: HMAC-signed cookie holding the verified claims;
-  `WithSessionTTL` configures lifetime (default 24h).
-- **Upgrade note:** session cookies now carry a signed issue time
-  (`iat`), and a cookie without one is rejected rather than partially
-  trusted. Cookies minted by v0.5.0 and earlier have no `iat`, so
-  upgrading logs out every existing user at once; they are redirected
-  through login on their next request. This is deliberate — the
-  library fails closed rather than granting a session it cannot date.
-- `WithLogger(*slog.Logger)` — receives diagnostic messages, such as
-  the reason a session cookie was rejected (logged at debug level, with
-  the failure class only — never a cookie value or user identity). The
-  default discards all output.
-- `ForceApprovalIfNewUser(func(iss, sub string) bool)` — when the
-  callback sees an (`iss`, `sub`) pair your app has not recorded, the
-  auth request restarts
-  once with a forced consent prompt, so each user gets an explicit
-  consent screen exactly once per app. The default prompt parameters
-  are issuer-neutral; for an issuer that rejects them (e.g. Google
-  used directly), `WithForceConsentParams` overrides them — see its
-  doc comment.
+### Protect routes
 
-## Key accounts on `(iss, sub)`, never on email
+Wrap the whole tree in `Authenticate`: it verifies the cookie once
+per request, never rejects, and keeps active sessions alive. Gate
+individual routes with `RequireAuth`, which redirects anonymous GETs
+to login and returns 401 to everything else. `UserFromContext` works
+behind either, so public pages can show login/logout links.
+See [Middleware](https://pkg.go.dev/github.com/xdg-go/oidcauth#hdr-Middleware).
 
-The pair (`iss`, `sub`) is the **only** identifier an app may use as
-an account key — `sub` is unique and never reassigned *within* an
-issuer, and means nothing outside it. `User.Issuer` carries the
-verified `iss` so apps can store the pair. Store email *alongside* it
-for display and recovery, but never key on it and never auto-link
-accounts by it:
+### Identify the user
 
-- OIDC guarantees `sub` is unique per issuer and never reassigned. It
-  guarantees nothing about email.
-- Emails are mutable. A user who changes their address would be
-  severed from an email-keyed account.
-- Emails are reassignable. Google Workspace recycles addresses;
-  keying on email hands the old account to the address's new holder —
-  an account takeover.
-- A second connector (passkeys, GitHub, ...) can present the same
-  email under a different `sub`; email-keying silently merges
-  distinct identities.
-- Auto-linking a new `sub` to an existing account because the emails
-  match is the same takeover with extra steps (the "nOAuth" attack
-  class: some issuers emit attacker-controlled or unverified emails).
-  Email may only ever *suggest* a link that the user then proves —
-  e.g. by a verification challenge to that address — never establish
-  one by itself.
+Key accounts on the pair `(user.Issuer, user.Sub)`, never on email.
+`sub` is unique and never reassigned within an issuer; email is
+mutable, reassignable, and in some issuers unverified. Store email
+alongside the pair for display and recovery only. The rationale,
+including the nOAuth attack class and issuer-migration caveats, is in
+[Identity](https://pkg.go.dev/github.com/xdg-go/oidcauth#hdr-Identity).
 
-**Issuer-migration caveat:** `sub` is unique and stable only *within*
-an issuer, and its value is opaque — issuers commonly derive it from
-internal or upstream identifiers (which authentication backend the
-user came through, and that backend's user id). Replacing the issuer
-implementation, or changing how it authenticates users upstream, can
-therefore change every `sub` even when the issuer URL stays the same.
-A migration must either preserve `sub` values or map old→new via a
-stored durable attribute. The best durable attribute is the upstream
-pair itself — (authentication backend, backend's user id) — captured
-via `WithExtraClaims` when the issuer emits it as claims, or derived
-from `sub` when the issuer documents its encoding. Email is the
-fallback mapping attribute, subject to the verification rule above.
-This is why you store email and any upstream identity alongside
-`(iss, sub)` even though you never key on them.
+### Log out
+
+Logout is POST-only, so drive it from a form, not a link:
+
+```html
+<form method="post" action="/auth/logout"><button>Log out</button></form>
+```
+
+It clears the app's cookie; the issuer's own session is untouched. To
+end a session from inside your own handler (account deletion, say),
+call `auth.ClearSession(w)`.
+
+### Tune session lifetime
+
+```go
+auth, err := oidcauth.NewFromEnv(
+	oidcauth.WithSessionLifetime(30*24*time.Hour),   // slides with activity
+	oidcauth.WithSessionRenewWindow(15*24*time.Hour), // renew this close to expiry
+	oidcauth.WithSessionMaxLifetime(90*24*time.Hour), // hard cap from login
+)
+```
+
+Defaults are 90, 45, and 365 days. Renewal does not re-check the
+identity provider, so the max lifetime bounds how long a disabled
+user can stay logged in. See
+[Session lifetime](https://pkg.go.dev/github.com/xdg-go/oidcauth#hdr-Session_lifetime).
+
+### Ask for consent once per new user
+
+```go
+oidcauth.ForceApprovalIfNewUser(func(iss, sub string) bool {
+	return store.UserExists(iss, sub)
+})
+```
+
+An unfamiliar `(iss, sub)` restarts the login with a forced consent
+prompt, so every user sees the consent screen exactly once for your
+app.
+
+### Caching and CDNs
+
+Any response that writes a session cookie gets
+`Cache-Control: private, no-store`; any response with a verified
+session gets `private`; anonymous responses are left alone, so public
+pages stay cacheable. One rule: if your handler sets `Cache-Control`
+itself on a route that can carry a session, set `private, no-store`.
+See [Caching](https://pkg.go.dev/github.com/xdg-go/oidcauth#hdr-Caching).
+
+## Status
+
+Pre-1.0. The API is small and settling; breaking changes land on minor
+versions until 1.0.
 
 ## License
 

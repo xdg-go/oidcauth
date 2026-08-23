@@ -139,8 +139,8 @@ internal-client decision if a consumer needs a custom transport.
 Sliding renewal needs an `http.ResponseWriter` to emit `Set-Cookie`, so
 it cannot live behind a read-only accessor. The library exposes `func
 (a *Auth) Authenticate(next http.Handler) http.Handler`: it verifies the session
-cookie, renews it when the session is past the half-life of the idle
-window, stores the user in the request context, and never rejects, so
+cookie, renews it when the session is past the half-life of the session
+lifetime, stores the user in the request context, and never rejects, so
 anonymous requests pass through untouched. `RequireAuth` composes on
 `Authenticate` and rejects only when the context carries no user;
 `UserFromContext` stays a pure context read. `Auth.User(r
@@ -165,98 +165,64 @@ logged out for a logged-in user, and nothing at runtime reports the
 mistake. With it, `Authenticate(mux)` plus `RequireAuth`, and bare
 `RequireAuth`, each perform exactly one verification.
 
-## 2026-08-21 — Force responses that carry a session cookie uncacheable
-
-**Partly superseded** — see "Write session cache headers at middleware
-entry, not through a ResponseWriter wrapper". The goal and the header
-values stand; the wrapper mechanism does not.
+## 2026-08-21 — Write session cache headers at middleware entry, no ResponseWriter wrapper
 
 Any response the library writes a session cookie onto (renewal, login
-callback, logout) also gets `Cache-Control: private, no-store`, applied
-through an `http.ResponseWriter` wrapper that re-asserts the header at
-`WriteHeader` time. Such a response contains a credential, and a
-misconfigured CDN — a "Cache Everything" rule, a stray `s-maxage` —
-would hand one user's session cookie to the next requester, a total auth
-bypass. Setting the header without the wrapper was rejected: a handler
-that sets `Cache-Control: public` on a public-but-personalized page
-silently wins the last write. The wrapper implements `Unwrap()
-http.ResponseWriter` and forwards `Flush` and `ReadFrom`, so
-`http.NewResponseController` and websocket hijacking keep working
-through it.
-
-`AuthenticateNoRenew` is the variant for routes that must never emit a
-credential: it verifies and populates the context but never renews, and
-sets `Cache-Control: private` when it finds a valid session. Its
-justification is "do not emit credentials on this route", *not*
-cacheability — a page that adapts to login state is exactly the page
-that must not be shared-cached, and dropping the `Set-Cookie` removes
-the very signal that triggers default CDN bypass. Its doc comment must
-warn that at least one renewing mount has to sit in the user's normal
-path, or sessions expire at the idle window no matter how active the
-user is. A variadic middleware option or an `Option` on `Auth` was
-rejected because the property is per-mount, not per-instance.
-
-## 2026-08-21 — Keep 90d idle / 1y absolute session defaults
-
-The defaults ship as a 90 day idle window with a 1 year absolute cap,
-deliberately against adversarial review that argued for 30d/90d. The
-target consumers are internal tools where a re-login every quarter is
-friction without a matching threat, and the Phase 4 per-user revocation
-hook (an app-side revocation timestamp compared against the session's
-`IssuedAt`) is the mitigation for the cases that matter. Shorter
-defaults were rejected as buying little against an operator who can
-already revoke.
-
-The consequence to document in the README: renewal is not
-re-authentication. Claims freeze at login, so a user disabled at the IdP
-or whose group membership changed can hold a valid session until the
-absolute cap. Revisit these numbers if oidcauth is adopted for anything
-internet-facing, or if the revocation hook does not land.
-
-## 2026-08-21 — Write session cache headers at middleware entry, not through a ResponseWriter wrapper (partly supersedes "Force responses that carry a session cookie uncacheable")
-
-The `Cache-Control` headers and the renewal `Set-Cookie` are written at
-middleware entry, before the next handler is called. The
-`http.ResponseWriter` wrapper that re-asserted the header at
-`WriteHeader` time is dropped, and with it the `Unwrap`/`Flush`/
-`ReadFrom` forwarding and the `NewResponseController` and hijack
-compatibility tests. A wrapper is only necessary when the cookie's
+callback, logout) also carries `Cache-Control: private, no-store`, and
+`AuthenticateNoRenew` sets `Cache-Control: private` when it finds a
+valid session. Both headers, and the renewal `Set-Cookie` itself, are
+written at middleware entry, before the next handler is called. There
+is no `http.ResponseWriter` wrapper re-asserting the header at
+`WriteHeader` time. A wrapper is only necessary when the cookie's
 contents depend on what the handler did; oidcauth's renewal decision
 depends on nothing but the incoming cookie and the clock, so it is
 already known at entry. `alexedwards/scs` needs its
 `sessionResponseWriter` precisely because handlers mutate its session
 data; oauth2-proxy, whose refresh is decided up front like ours, writes
-`Set-Cookie` straight to the real writer from
-`refreshSessionIfNeeded`.
+`Set-Cookie` straight to the real writer from `refreshSessionIfNeeded`.
 
-The wrapper's one genuine advantage was last-write-wins over a handler
-that sets `Cache-Control: public`. That is given up deliberately, and
-the README must say so. It buys back real risk: `ReadFrom` is not
-covered by `http.NewResponseController`, so an `Unwrap`-only wrapper
-silently loses the sendfile fast path, while a wrapper that *does*
-forward `ReadFrom` must also fire the header logic there or every
+The header values are load-bearing rather than belt-and-braces: RFC 9111
+§7.3 states that `Set-Cookie` does not inhibit caching, and AWS
+CloudFront documents that it caches `Set-Cookie` and returns it "to
+viewers on all cache hits". nginx, Varnish, and Fastly refuse by
+default; Cloudflare under "Cache Everything" with an edge TTL strips
+the `Set-Cookie` and caches the body, breaking login rather than
+leaking it. A response holding a session cookie is a credential, and a
+misconfigured CDN would hand one user's cookie to the next requester, a
+total auth bypass. Every response through the middleware also gets
+`Vary: Cookie`; see the next entry.
+
+Entry-time writing gives up last-write-wins over a handler that sets
+`Cache-Control: public`, and the README says so. That is the price of
+avoiding real wrapper risk: `ReadFrom` is not covered by
+`http.NewResponseController`, so an `Unwrap`-only wrapper silently
+loses the sendfile fast path, while a wrapper that *does* forward
+`ReadFrom` must also fire the header logic there or every
 `ServeContent` response bypasses it. Code that type-asserts
-`w.(http.Flusher)` rather than using `NewResponseController` — still
-common, e.g. gorilla/handlers — breaks against an `Unwrap`-only wrapper
-too. Note also that `scs` settled on `Header().Add` rather than `Set`,
-so even the closest Go prior art does not achieve last-write-wins.
-Revisit if the library ever needs to write a cookie whose contents the
-handler influences.
+`w.(http.Flusher)` rather than using `NewResponseController` -- still
+common, e.g. gorilla/handlers -- breaks against an `Unwrap`-only
+wrapper too. Note also that `scs` settled on `Header().Add` rather than
+`Set`, so even the closest Go prior art does not achieve
+last-write-wins. Revisit if the library ever needs to write a cookie
+whose contents the handler influences.
 
-The header values are unchanged and remain load-bearing rather than
-belt-and-braces: RFC 9111 §7.3 states that `Set-Cookie` does not
-inhibit caching, and AWS CloudFront documents that it caches
-`Set-Cookie` and returns it "to viewers on all cache hits". nginx,
-Varnish, and Fastly refuse by default; Cloudflare under "Cache
-Everything" with an edge TTL strips the `Set-Cookie` and caches the
-body, breaking login rather than leaking it.
+`AuthenticateNoRenew` is the variant for routes that must never emit a
+credential: it verifies and populates the context but never renews. Its
+justification is "do not emit credentials on this route", *not*
+cacheability -- a page that adapts to login state is exactly the page
+that must not be shared-cached, and dropping the `Set-Cookie` removes
+the very signal that triggers default CDN bypass. Its doc comment must
+warn that at least one renewing mount has to sit in the user's normal
+path, or sessions expire at the session lifetime no matter how active
+the user is. A variadic middleware option or an `Option` on `Auth` was
+rejected because the property is per-mount, not per-instance.
 
 ## 2026-08-21 — Send Vary: Cookie unconditionally
 
 Every response through the middleware gets `Vary: Cookie`, added at
 entry with no branch. Fastly warns that varying on `Cookie` "will
 likely be so specific as to make the response impossible to use again",
-and that is accurate — but for a response whose body depends on login
+and that is accurate -- but for a response whose body depends on login
 state, unreusable is the correct answer, and the alternative Fastly
 recommends (normalize the cookie into a low-cardinality header at the
 edge) is CDN configuration a Go library cannot express. Without it, a
@@ -265,11 +231,32 @@ to a logged-in user.
 
 Setting it conditionally, only when a session is present, was rejected:
 the condition is the thing an attacker controls, and the Go ecosystem
-has converged on the unconditional form — `alexedwards/scs` (since
+has converged on the unconditional form -- `alexedwards/scs` (since
 commit `91e3021b`, 2021), `gorilla/csrf`, and `justinas/nosurf` all set
 it on every request. Django is the one major framework that gates it,
 on session *access* rather than write. Use `Header().Add`, not `Set`,
 so a handler's own `Vary` entries survive.
+
+## 2026-08-21 — Keep 90d session lifetime / 1y max session lifetime defaults
+
+The defaults ship as a 90 day session lifetime with a 1 year maximum
+session lifetime, deliberately against adversarial review that argued
+for 30d/90d. The target consumers are internal tools where a re-login
+every quarter is friction without a matching threat, and the Phase 4
+per-user revocation hook (an app-side revocation timestamp compared
+against the session's `IssuedAt`) is the mitigation for the cases that
+matter. Shorter defaults were rejected as buying little against an
+operator who can already revoke. These numbers shipped before renewal
+and maximum-lifetime enforcement landed, chosen over an interim 24h or
+7d so the defaults would not move twice; both now enforce, so the
+shipped behavior matches the documented one.
+
+The consequence to document in the README: renewal is not
+re-authentication. Claims freeze at login, so a user disabled at the
+IdP or whose group membership changed can hold a valid session until
+the maximum lifetime deadline. Revisit these numbers if oidcauth is
+adopted for anything internet-facing, or if the revocation hook does
+not land.
 
 ## 2026-08-22 — Add a cookie secret key ring; reject per-session IDs
 
@@ -280,7 +267,7 @@ key in turn; `sign` always uses the current one. The motivation is that
 a single key made rotation a hard cutover that logs out every user and
 breaks logins mid-redirect, so the only global kill switch was too
 expensive to ever rehearse. With a ring, rotation is routine: promote,
-deploy, and retire the old key one full idle window later, by which
+deploy, and retire the old key one full session lifetime later, by which
 point every live session has renewed and been re-signed. Retiring the
 old key immediately, rather than after a delay, is the deliberate
 logout-everyone variant. The ring size is deliberately uncapped: each
@@ -290,14 +277,14 @@ operator to weigh rather than a limit the library imposes.
 
 Adding a random per-session ID to the payload, so an app could denylist
 individual sessions, was considered and rejected. A stolen cookie is a
-byte-identical clone, so its ID matches the victim's — per-session
+byte-identical clone, so its ID matches the victim's -- per-session
 revocation cannot evict the attacker while sparing the legitimate
 session, which was the security case for it. What remains is
 convenience: revoking one device's login instead of all of them. That
 is worth little here, because re-login through an IdP whose own session
 is still valid is a single redirect. The labeling problem finishes the
 argument: an opaque ID is meaningless to a user without a server-side
-record of user agent, address, and last-seen — exactly the session
+record of user agent, address, and last-seen -- exactly the session
 table this design rejects, at which point the signed cookie is only a
 bearer token pointing at server state. The Phase 4 revocation epoch
 covers offboarding and suspected compromise with far less machinery.
@@ -310,3 +297,79 @@ everywhere" must set the epoch to `now`, not to the current cookie's
 spares your session and its clone alike, since they share the
 timestamp. The user re-authenticates; that is the honest primitive.
 
+## 2026-08-22 — Assume one *Auth per process; keep UserFromContext a function
+
+`Authenticate` now stores an unexported `authResult` sentinel on every
+request, anonymous ones included, so a later `RequireAuth` can tell
+"middleware never ran" from "not logged in" and verify at most once.
+That sentinel lives under a package-scoped context key, which means two
+`*Auth` values in one process, with different cookie secrets or cookie
+names, would otherwise read each other's results. The supported
+deployment is a single `*Auth` per process, and that assumption is what
+lets `UserFromContext` stay a plain package-level function taking only a
+`context.Context`.
+
+Instance-scoped context keys were the alternative: give each `Auth` its
+own key and a foreign sentinel becomes invisible rather than
+detected, defining the failure out of existence. It lost on API cost,
+since `UserFromContext` would have to become the method
+`a.UserFromContext(ctx)` for every consumer, to fix a case no consumer
+has. The `authResult.owner == a` check in `RequireAuth` stays as cheap
+belt and braces, not as support for the multi-`Auth` case. Revisit if a
+real consumer needs to mount two `Auth` values in one process, at which
+point the method form is the honest fix.
+
+## 2026-08-22 — Rename the session knobs to WithSessionLifetime and WithSessionMaxLifetime
+
+`WithSessionIdleWindow` becomes `WithSessionLifetime` and
+`WithSessionAbsoluteCap` becomes `WithSessionMaxLifetime` (fields
+`sessionLifetime` and `maxSessionLifetime`). "Idle window" was
+inaccurate. An OWASP idle or inactivity timeout runs from the user's
+last request; this library measures from the last renewal, and renewal
+fires only on a request past the half-life, so an active user's session
+expires between half a lifetime and a full lifetime after their last
+request. Under `AuthenticateNoRenew` alone it does not slide at all. A
+reader trusting the old name would assume a deadline up to half a
+window fresher than reality. The closer prior art is ASP.NET Core
+cookie authentication's sliding expiration (`ExpireTimeSpan` plus
+`SlidingExpiration`), which also renews only past the half-life.
+
+The new names describe one kind of thing, a lifetime, differing only in
+origin: `WithSessionLifetime` runs from each cookie write and slides
+when `Authenticate` renews; `WithSessionMaxLifetime` runs from the
+original login and never moves. Both are hard deadlines, and a session
+dies at whichever comes first. A follow-up will add
+`WithSessionRenewWindow` to make the half-life an explicit knob rather
+than a constant readers have to infer from the name.
+
+## 2026-08-22 — Add WithSessionRenewWindow instead of a hardcoded half-life
+
+Renewal used to fire at `Expiry - sessionLifetime/2`. The divisor was
+an implementation detail of `renewSessionCookie` that callers could
+only learn from prose, yet it set the real worst-case staleness of an
+idle session. Naming it makes renewal a documented
+feature of the session model rather than a constant readers infer, and
+it makes a configuration nobody could reach before reachable: with
+`renewWindow == sessionLifetime` every request renews, which is the
+true last-request idle timeout the old `WithSessionIdleWindow` name
+wrongly promised.
+
+The default is a literal, `renewWindow: 45 * 24 * time.Hour`, sitting
+in the same struct as the 90-day lifetime and the 365-day max, not a
+value computed from `sessionLifetime` after the option loop. A reader
+can see all three defaults and check their consistency by reading one
+struct, and there is no option-order dependence or unset sentinel to
+reason about. A caller who passes a
+short `WithSessionLifetime` and no `WithSessionRenewWindow` now fails
+construction against the 45-day default instead of getting a silently
+scaled window. This library already makes that trade for the
+lifetime/max pair, which rejects rather than substituting, so the error
+message names both values and says which option to set.
+
+`renewWindow == sessionLifetime` is legal; only `>` is rejected. Equal
+is a coherent, useful policy, and refusing it would only push callers
+toward `lifetime - 1ns`. Greater is not a policy at all: the trigger
+`now >= Expiry - renewWindow` would be true from the instant the cookie
+is written, so every value above the lifetime collapses to the same
+renew-on-every-request behavior that equality already expresses. The
+full rule is renew window <= session lifetime <= max lifetime.
