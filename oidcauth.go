@@ -1,79 +1,18 @@
 // Package oidcauth provides OIDC login for Go web apps using only
-// net/http: authorization-code flow with PKCE, state and nonce
-// validation, and the verified identity in an HMAC-signed cookie. It
-// wraps github.com/coreos/go-oidc/v3 and golang.org/x/oauth2 and works
-// with any conformant issuer.
+// net/http. It is a thin wrapper over github.com/coreos/go-oidc/v3 and
+// golang.org/x/oauth2 that handles the authorization-code flow with PKCE
+// (S256), state and nonce validation, and a signed session cookie.
 //
-// # Identity
+// It targets any conformant OIDC issuer; nothing in this package is
+// specific to a particular identity provider.
 //
-// Key accounts on (iss, sub). Never key on email, and never link
-// accounts because emails match.
+// # Identity rule: key on sub, never on email
 //
-// sub is unique and permanent within an issuer. Email is none of those:
-// users change it, providers recycle it, and some issuers emit it
-// unverified or attacker-chosen (the "nOAuth" attack). A second
-// connector can present the same email under a different sub. Store
-// email beside the pair for display and recovery; let it suggest a
-// link only when the user proves it, e.g. by a verification challenge.
-//
-// sub is opaque and stable only within an issuer. Replacing the issuer
-// implementation, or how it authenticates upstream, can change every
-// sub behind an unchanged URL. Before such a migration, store a durable
-// upstream identity (via [WithExtraClaims]) or accept email as the
-// mapping key under the rule above.
-//
-// # Middleware
-//
-// Wrap the whole tree in [Auth.Authenticate]; gate routes with
-// [Auth.RequireAuth]. Authenticate verifies once per request, never
-// rejects, and renews the cookie. RequireAuth reuses that result, or
-// verifies inline when no Authenticate ran. Either way the cookie is
-// checked exactly once.
-//
-// Only Authenticate renews. Mount at least one in the user's normal
-// browsing path, or sessions expire a full lifetime after login no
-// matter how active the user is. Nesting cannot turn renewal off: the
-// strongest mount covering a route decides, and a response never
-// carries two session cookies.
-//
-// One *Auth per process; see [UserFromContext].
-//
-// # Session lifetime
-//
-// Two deadlines, both checked on every verify; the first one reached
-// ends the session.
-//
-//   - [WithSessionLifetime] (90d) counts from the last cookie write and
-//     slides: a request within [WithSessionRenewWindow] (45d) of expiry
-//     re-issues the cookie.
-//   - [WithSessionMaxLifetime] (365d) counts from first login for a cookie
-//     and never moves. Renewal will not extend a session past max lifetime.
-//
-// Renewal extends cookie expiration.  It does not re-authentication. Claims
-// freeze at login, so a user disabled at the provider keeps a valid session
-// until the max lifetime.
-//
-// [New] requires renew window <= lifetime <= max lifetime and fails
-// rather than substituting defaults.
-//
-// Before writing the session cookie the package drops any queued
-// Set-Cookie of the same name, so the last writer wins. Matching
-// ignores Path and Domain; a handler clearing a legacy Domain= copy of
-// the same name in the same response loses that write.
-//
-// # Issuer availability
-//
-// [New] does no I/O. Discovery runs on the first login and retries
-// with a cooldown. Session verification uses CookieSecret, not the
-// issuer's keys, so existing sessions survive an issuer outage; new
-// logins return 503 until discovery succeeds. [Auth.Connect] makes
-// startup fail instead.
-//
-// # Logout
-//
-// [Auth.LogoutHandler] is POST-only and clears only the app cookie; the
-// issuer's session is untouched. [Auth.ClearSession] does the same from
-// inside your own handler.
+// Apps must key user accounts on the ID token's `sub` claim, never on
+// email. OIDC guarantees `sub` is unique per issuer and never reassigned;
+// it guarantees nothing about email. Emails are mutable and reassignable.
+// Store email alongside `sub` for display and migration, but only `sub`
+// is the key. See the README for the full rationale.
 package oidcauth
 
 import (
@@ -251,7 +190,8 @@ func WithSessionLifetime(d time.Duration) Option {
 // request, which is the true last-request idle timeout: the deadline
 // always sits exactly one lifetime after the user's most recent
 // request. Until the max lifetime tail described below, it costs a
-// Set-Cookie on every authenticated response.
+// Set-Cookie on every authenticated response, and per the cache rules
+// every such response is marked Cache-Control: private, no-store.
 //
 // As a session approaches the max lifetime, a renewal's new expiry is
 // clamped to the max lifetime deadline. Once the expiry is pinned

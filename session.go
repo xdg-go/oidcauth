@@ -148,6 +148,7 @@ func (a *Auth) setSessionCookie(w http.ResponseWriter, u User) {
 // advertising an expiry the server would refuse to honor.
 func (a *Auth) writeSessionCookie(w http.ResponseWriter, u User, issuedAt int64, exp time.Time) {
 	exp = exp.Truncate(time.Second)
+	markSessionResponse(w)
 	payload, _ := json.Marshal(sessionPayload{User: u, Expiry: exp, IssuedAt: issuedAt})
 	a.dropPendingSessionCookie(w)
 	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for http://localhost dev)
@@ -201,6 +202,7 @@ func setCookieName(value string) string {
 }
 
 func (a *Auth) clearSessionCookie(w http.ResponseWriter) {
+	markSessionResponse(w)
 	a.dropPendingSessionCookie(w)
 	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for http://localhost dev)
 		Name:     a.sessionCookieName,
@@ -288,6 +290,7 @@ func (a *Auth) renewSessionCookie(w http.ResponseWriter, s sessionPayload, now t
 }
 
 func (a *Auth) setStateCookie(w http.ResponseWriter, s statePayload) {
+	markSessionResponse(w)
 	s.Expiry = a.now().Add(stateTTL)
 	payload, _ := json.Marshal(s)
 	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for http://localhost dev)
@@ -302,6 +305,7 @@ func (a *Auth) setStateCookie(w http.ResponseWriter, s statePayload) {
 }
 
 func (a *Auth) clearStateCookie(w http.ResponseWriter) {
+	markSessionResponse(w)
 	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for http://localhost dev)
 		Name:     a.stateCookieName(),
 		Value:    "",
@@ -342,4 +346,44 @@ func randomToken() string {
 		panic(fmt.Sprintf("oidcauth: crypto/rand failed: %v", err))
 	}
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// markSessionResponse marks the response as carrying a credential:
+// it must never be stored, by a shared cache or a private one. It is
+// called from every path that writes a credential cookie: renewal,
+// the login callback, logout, [Auth.ClearSession], and both the write
+// and the clear of the short-lived OIDC state cookie, so the login
+// redirect is covered too. The guarantee is structural rather than a
+// rule each caller has to remember.
+//
+// Set, not Add: it deliberately overwrites the weaker "private" that
+// the middleware writes at entry when it finds a valid session. A
+// handler that later overwrites Cache-Control itself still wins, and
+// the library does not prevent that (see the README).
+func markSessionResponse(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "private, no-store")
+}
+
+// markPrivateResponse marks a response whose body may depend on who is
+// logged in, so a shared cache must not serve it to another user. It
+// is written only when a session verified: an anonymous request keeps
+// whatever Cache-Control the app chose, so public pages stay
+// shared-cacheable.
+//
+// It must not run after a session cookie was written on the same
+// response: Set would downgrade "private, no-store" to "private". The
+// fresh-verify path orders it before renewal; the sentinel-hit path
+// in [Auth.authenticate] skips it once a renewal is recorded.
+func markPrivateResponse(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "private")
+}
+
+// varyOnCookie tells caches that this response may differ per cookie.
+// It is unconditional: gating it on "a session was present" makes the
+// condition attacker-controlled, and without it a shared cache that
+// stored the anonymous rendering of a URL would serve it to a
+// logged-in user. Add, not Set, so a handler's own Vary entries
+// survive.
+func varyOnCookie(w http.ResponseWriter) {
+	w.Header().Add("Vary", "Cookie")
 }

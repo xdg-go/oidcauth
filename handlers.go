@@ -14,7 +14,9 @@ import (
 
 // LoginHandler starts the authorization-code flow: it generates state,
 // nonce, and a PKCE (S256) verifier, binds them to the browser via a
-// signed short-lived cookie, and redirects to the issuer.
+// signed short-lived cookie, and redirects to the issuer. That state
+// cookie is a credential, so the redirect carries
+// Cache-Control: private, no-store and is never cache-storable.
 //
 // Query parameters:
 //   - next: relative path to return to after login (default "/").
