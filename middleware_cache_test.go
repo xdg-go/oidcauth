@@ -127,16 +127,12 @@ func TestBareRequireAuthSetsCacheHeaders(t *testing.T) {
 	wantCacheHeaders(t, rr, "private", []string{"Cookie"})
 }
 
-// TestRequireAuthInsideAuthenticateAddsVaryOnce pins one ordering:
-// Authenticate on the outside, RequireAuth within. There the inline
-// verify is skipped, so Vary: Cookie is added exactly once.
-//
-// Other nesting orders do add Cookie twice: each mount calls
-// varyOnCookie before the sentinel check, so
-// AuthenticateNoRenew(Authenticate(h)) and RequireAuth(Authenticate(h))
-// both yield Vary: [Cookie Cookie]. Duplicate entries are legal, and
-// the unconditional single Header().Add is the settled behavior per
-// docs/decisions.md ("Send Vary: Cookie unconditionally").
+// TestRequireAuthInsideAuthenticateAddsVaryOnce pins the count under
+// nesting: only the mount that actually verifies adds Vary: Cookie, so
+// however deep the mounts stack, a response carries it once. Every
+// response through the middleware still gets it, per docs/decisions.md
+// ("Send Vary: Cookie unconditionally") -- unconditional means not
+// gated on whether a session is present, not once per mount.
 func TestRequireAuthInsideAuthenticateAddsVaryOnce(t *testing.T) {
 	a, c, advance := renewalFixture(t)
 	advance(29 * time.Minute)
@@ -153,8 +149,7 @@ func TestRequireAuthInsideAuthenticateAddsVaryOnce(t *testing.T) {
 // TestNestedAuthenticateUpgradesToNoStore pins the sentinel-hit
 // renewal path: the outer non-renewing mount writes "private", then
 // the inner renewing mount renews on the same request and upgrades it
-// to "private, no-store". Vary carries Cookie twice by design (see
-// TestRequireAuthInsideAuthenticateAddsVaryOnce).
+// to "private, no-store".
 func TestNestedAuthenticateUpgradesToNoStore(t *testing.T) {
 	a, c, advance := renewalFixture(t)
 	advance(31 * time.Minute) // inside the renew window: the inner mount renews
@@ -171,7 +166,7 @@ func TestNestedAuthenticateUpgradesToNoStore(t *testing.T) {
 	if sessionCookieOrNil(rr, a.sessionCookieName) == nil {
 		t.Fatal("no renewal Set-Cookie, so this test proves nothing")
 	}
-	wantCacheHeaders(t, rr, "private, no-store", []string{"Cookie", "Cookie"})
+	wantCacheHeaders(t, rr, "private, no-store", []string{"Cookie"})
 }
 
 // TestHandlerVaryEntriesSurvive pins Header().Add over Set.
@@ -270,5 +265,5 @@ func TestNoRenewInsideRenewingKeepsNoStore(t *testing.T) {
 	if sessionCookieOrNil(rr, a.sessionCookieName) == nil {
 		t.Fatal("no renewal Set-Cookie, so this test proves nothing")
 	}
-	wantCacheHeaders(t, rr, "private, no-store", []string{"Cookie", "Cookie"})
+	wantCacheHeaders(t, rr, "private, no-store", []string{"Cookie"})
 }
