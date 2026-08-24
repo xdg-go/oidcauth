@@ -48,43 +48,29 @@ type authResult struct {
 // through untouched. Mount it as the outermost wrapper around your
 // whole handler tree; [Auth.RequireAuth] composes on it.
 //
-// Authenticate is the mount point for sliding session renewal: when a
-// valid session has entered the renew window before its expiry it
-// writes a renewed Set-Cookie before calling next, so the cookie cannot
-// lose a race with the handler's own headers. The renewed cookie keeps
-// the original issue time and its expiry is clamped to the max
-// lifetime, so renewal slides a session forward but never past that
-// deadline. A session that has reached the max lifetime is rejected
-// outright, even while its own cookie expiry is still in the future,
-// exactly as an expired one is.
-//
-// Cache headers are written at entry too. Every response gets
-// Vary: Cookie. A response carrying a renewed session cookie gets
-// Cache-Control: private, no-store, because it carries a credential;
-// a verified session with no renewal gets Cache-Control: private.
-// Anonymous requests are left alone, so public pages stay
-// shared-cacheable. Because these are written before next runs, a
-// handler that sets its own Cache-Control on such a response wins and
-// defeats them; the library does not prevent that.
+// Authenticate is the mount point for sliding session renewal: a valid
+// session inside its renew window gets a renewed Set-Cookie, written
+// before next runs so it cannot lose a race with the handler's own
+// headers. Cache headers are written at entry as well. The lifetime
+// and caching rules -- the two clocks, the max-lifetime cap, which
+// Cache-Control each response gets, and the handler that overwrites it
+// -- are in the package doc under "Session lifetime" and "Caching".
 func (a *Auth) Authenticate(next http.Handler) http.Handler {
 	return a.authenticate(next, true)
 }
 
 // AuthenticateNoRenew is [Auth.Authenticate] without session renewal:
-// it verifies and populates the context but will never write a session
-// cookie. Use it on routes that must not emit a credential.
-//
-// It writes the same cache headers as [Auth.Authenticate], except
-// that with no renewal the strongest it writes is
-// Cache-Control: private.
+// it verifies and populates the context but never writes a session
+// cookie, so the strongest cache header it writes is
+// Cache-Control: private. Use it on routes that must not emit a
+// credential.
 //
 // It suppresses renewal only for the routes it alone serves: an
-// [Auth.Authenticate] nested inside it still renews (see the package
-// doc on middleware for why).
-//
-// At least one Authenticate mount must sit in the user's normal
-// browsing path, or sessions expire a full lifetime after login no
-// matter how active the user is.
+// [Auth.Authenticate] nested inside it still renews (the strongest
+// mount wins; see "Middleware" in the package doc). Keep at least one
+// [Auth.Authenticate] in the user's normal browsing path, or sessions
+// expire a full lifetime after login no matter how active the user
+// is.
 func (a *Auth) AuthenticateNoRenew(next http.Handler) http.Handler {
 	return a.authenticate(next, false)
 }
@@ -139,23 +125,14 @@ func (a *Auth) verifySession(r *http.Request) authResult {
 // to the login handler with `next` set to the requested path; other
 // methods get 401.
 //
-// RequireAuth composes on [Auth.Authenticate]: when an outer
-// Authenticate from the same Auth has already verified the request it
-// enforces from the context, and otherwise it verifies inline. Either
-// way the session cookie is verified exactly once. RequireAuth itself
-// never renews, but an [Auth.Authenticate] mounted inside it still
-// does.
-//
-// When it does verify inline it writes the same cache headers an
-// [Auth.Authenticate] mount would for a non-renewing request:
-// Vary: Cookie always, and Cache-Control: private once a session
-// verifies. When an outer Authenticate already ran, that mount has
-// written them and RequireAuth adds nothing.
-//
-// A tree with no Authenticate at all verifies but never renews, so
-// sessions expire a full lifetime after login no matter how active
-// the user is. Mount at least one Authenticate in the user's normal
-// browsing path.
+// RequireAuth composes on [Auth.Authenticate]: it reuses an outer
+// mount's result, or verifies inline, writing the same cache headers a
+// non-renewing mount would. Either way the cookie is verified exactly
+// once. RequireAuth itself never renews, though an [Auth.Authenticate]
+// mounted inside it still does; a tree with no Authenticate at all
+// never renews, so sessions expire a full lifetime after login no
+// matter how active the user is. See "Middleware" in the package doc
+// for mounting guidance.
 func (a *Auth) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Only this Auth's own sentinel is trusted (see [authResult]).
