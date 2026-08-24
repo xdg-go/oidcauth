@@ -267,3 +267,15 @@ func TestNoRenewInsideRenewingKeepsNoStore(t *testing.T) {
 	}
 	wantCacheHeaders(t, rr, "private, no-store", []string{"Cookie"})
 }
+
+// TestMarkPrivateResponseNeverDowngrades pins the floor directly,
+// since no public API can reach it: resolve writes the header before
+// anything writes a cookie. It guards the ordering for future callers.
+func TestMarkPrivateResponseNeverDowngrades(t *testing.T) {
+	rr := httptest.NewRecorder()
+	markSessionResponse(rr)
+	markPrivateResponse(rr)
+	if got := rr.Header().Get("Cache-Control"); got != "private, no-store" {
+		t.Errorf("Cache-Control = %q, want %q", got, "private, no-store")
+	}
+}

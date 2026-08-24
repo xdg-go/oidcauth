@@ -347,6 +347,8 @@ func randomToken() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
+const noStoreCacheControl = "private, no-store"
+
 // markSessionResponse marks the response as carrying a credential:
 // it must never be stored, by a shared cache or a private one. It is
 // called from every path that writes a credential cookie: renewal,
@@ -358,7 +360,7 @@ func randomToken() string {
 // Set, not Add: it deliberately overwrites the weaker "private" that
 // the middleware writes at entry when it finds a valid session.
 func markSessionResponse(w http.ResponseWriter) {
-	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Cache-Control", noStoreCacheControl)
 }
 
 // markPrivateResponse marks a response whose body may depend on who is
@@ -367,11 +369,17 @@ func markSessionResponse(w http.ResponseWriter) {
 // whatever Cache-Control the app chose, so public pages stay
 // shared-cacheable.
 //
-// It must not run after a session cookie was written on the same
-// response: Set would downgrade "private, no-store" to "private".
-// [Auth.authenticate] has the only ordering that matters, and writes
-// it in one place, before any renewal.
+// It never downgrades a response already marked no-store. Today
+// [Auth.resolve] is the only caller and runs before anything can write
+// a cookie, so the guard is unreachable -- it is here so that ordering
+// stays a property of this pair of functions rather than a rule a
+// future caller has to know. It cannot police a caller's own handler
+// overwriting Cache-Control; only a http.ResponseWriter wrapper could,
+// and that trade was declined (see docs/decisions.md).
 func markPrivateResponse(w http.ResponseWriter) {
+	if w.Header().Get("Cache-Control") == noStoreCacheControl {
+		return
+	}
 	w.Header().Set("Cache-Control", "private")
 }
 
