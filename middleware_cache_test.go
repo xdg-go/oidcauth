@@ -269,7 +269,7 @@ func TestNoRenewInsideRenewingKeepsNoStore(t *testing.T) {
 }
 
 // TestMarkPrivateResponseNeverDowngrades pins the floor directly,
-// since no public API can reach it: resolve writes the header before
+// since no public API can reach it: verifyOnce writes the header before
 // anything writes a cookie. It guards the ordering for future callers.
 func TestMarkPrivateResponseNeverDowngrades(t *testing.T) {
 	rr := httptest.NewRecorder()

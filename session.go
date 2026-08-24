@@ -349,33 +349,21 @@ func randomToken() string {
 
 const noStoreCacheControl = "private, no-store"
 
-// markSessionResponse marks the response as carrying a credential:
-// it must never be stored, by a shared cache or a private one. It is
-// called from every path that writes a credential cookie: renewal,
-// the login callback, logout, [Auth.ClearSession], and both the write
-// and the clear of the short-lived OIDC state cookie, so the login
-// redirect is covered too. The guarantee is structural rather than a
-// rule each caller has to remember.
-//
-// Set, not Add: it deliberately overwrites the weaker "private" that
-// the middleware writes at entry when it finds a valid session.
+// markSessionResponse marks a response carrying a credential cookie:
+// no cache may store it, private ones included. Every path that writes
+// such a cookie calls it, so covering a new one is not a rule the
+// author has to remember. Set overwrites the weaker "private".
 func markSessionResponse(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", noStoreCacheControl)
 }
 
-// markPrivateResponse marks a response whose body may depend on who is
-// logged in, so a shared cache must not serve it to another user. It
-// is written only when a session verified: an anonymous request keeps
-// whatever Cache-Control the app chose, so public pages stay
-// shared-cacheable.
+// markPrivateResponse marks a response as unshareable because its body
+// may depend on who is logged in.
 //
-// It never downgrades a response already marked no-store. Today
-// [Auth.resolve] is the only caller and runs before anything can write
-// a cookie, so the guard is unreachable -- it is here so that ordering
-// stays a property of this pair of functions rather than a rule a
-// future caller has to know. It cannot police a caller's own handler
-// overwriting Cache-Control; only a http.ResponseWriter wrapper could,
-// and that trade was declined (see docs/decisions.md).
+// The no-store guard is unreachable today -- [Auth.verifyOnce] is the
+// only caller and runs before anything writes a cookie. Keep it: it
+// makes "a cookie write is never downgraded" a property of these two
+// functions instead of a call-order rule a later caller has to know.
 func markPrivateResponse(w http.ResponseWriter) {
 	if w.Header().Get("Cache-Control") == noStoreCacheControl {
 		return

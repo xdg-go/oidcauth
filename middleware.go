@@ -77,7 +77,7 @@ func (a *Auth) AuthenticateNoRenew(next http.Handler) http.Handler {
 
 func (a *Auth) authenticate(next http.Handler, renew bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		res, r := a.resolve(w, r)
+		res, r := a.verifyOnce(w, r)
 		// The renewal decision belongs to the strongest mount, not the
 		// outermost: a renewing mount nested inside a non-renewing one
 		// (or inside RequireAuth's inline verify) still renews, as
@@ -95,9 +95,9 @@ func (a *Auth) authenticate(next http.Handler, renew bool) http.Handler {
 	})
 }
 
-// resolve returns this request's session, verifying the cookie only if
-// no mount of this Auth already did, so nesting the middlewares
-// verifies exactly once. It returns the request to pass down: a fresh
+// verifyOnce returns this request's session, verifying the cookie only
+// if no mount of this Auth already did: however the middlewares nest,
+// a request is verified exactly once. It returns the request to pass down: a fresh
 // verify carries the sentinel on the context, a reused one is
 // unchanged.
 //
@@ -107,7 +107,7 @@ func (a *Auth) authenticate(next http.Handler, renew bool) http.Handler {
 // this package makes -- a renewed cookie, a login, a logout -- only
 // upgrades "private" to "private, no-store". A reused result means an
 // earlier mount already wrote them.
-func (a *Auth) resolve(w http.ResponseWriter, r *http.Request) (authResult, *http.Request) {
+func (a *Auth) verifyOnce(w http.ResponseWriter, r *http.Request) (authResult, *http.Request) {
 	// Only this Auth's own sentinel is trusted (see [authResult]).
 	if res, ok := r.Context().Value(ctxKey{}).(authResult); ok && res.owner == a {
 		return res, r
@@ -145,7 +145,7 @@ func (a *Auth) resolve(w http.ResponseWriter, r *http.Request) (authResult, *htt
 // for mounting guidance.
 func (a *Auth) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		res, r := a.resolve(w, r)
+		res, r := a.verifyOnce(w, r)
 		if !res.ok {
 			if r.Method == http.MethodGet || r.Method == http.MethodHead {
 				v := url.Values{"next": {r.URL.RequestURI()}}
