@@ -168,8 +168,8 @@ func (a *Auth) writeSessionCookie(w http.ResponseWriter, u User, issuedAt int64,
 // that then mints or clears the session would otherwise emit two.
 // Matching is by cookie name only, so a handler's own Set-Cookie
 // reusing the session cookie name under a different Path or Domain is
-// dropped too (see the README). Cookies under any other name,
-// including the state cookie, are left alone.
+// dropped too (see "Caching" in the package doc). Cookies under any
+// other name, including the state cookie, are left alone.
 func (a *Auth) dropPendingSessionCookie(w http.ResponseWriter) {
 	pending := w.Header()["Set-Cookie"]
 	kept := pending[:0]
