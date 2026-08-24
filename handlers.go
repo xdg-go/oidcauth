@@ -27,6 +27,9 @@ import (
 //     so the callback completes instead of restarting again. Anyone
 //     can forge a link with this parameter, but harmlessly so — the
 //     worst outcome is an unnecessary consent screen.
+//
+// It answers 405 to anything but GET or HEAD, and 503 with Retry-After
+// while OIDC discovery has not yet succeeded.
 func (a *Auth) LoginHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -64,6 +67,16 @@ func (a *Auth) LoginHandler() http.Handler {
 // the ID token (issuer, audience, expiry, signature) and its nonce,
 // then sets the app session cookie and redirects to the `next` path
 // captured at login.
+//
+// Failures are reported to the browser as status codes, never as a
+// session: 405 for non-GET, 503 while discovery has not succeeded, 400
+// for a missing, expired, or mismatched state cookie and for a missing
+// code, 403 for the issuer's access_denied, 502 for other issuer errors
+// (failed exchange, no id_token, unreadable claims), and 401 for a
+// failed signature or nonce check. Once the state cookie is read it is
+// cleared whatever follows, so a login attempt is spent on its first
+// callback. When [ForceApprovalIfNewUser] fires, the handler redirects
+// back to the login path instead of completing.
 func (a *Auth) CallbackHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -209,6 +222,10 @@ func (a *Auth) LogoutHandler() http.Handler {
 // flow — e.g. account deletion — where redirecting the in-flight POST
 // to the POST-only logout endpoint is not possible. It only ends the
 // app's session, exactly like LogoutHandler.
+//
+// Like every path that writes a session cookie, it sets
+// Cache-Control: private, no-store and drops any session Set-Cookie
+// already queued on w.
 func (a *Auth) ClearSession(w http.ResponseWriter) {
 	a.clearSessionCookie(w)
 }

@@ -21,8 +21,10 @@ type ctxKey struct{}
 // valid session. Storing it unconditionally is what lets
 // [Auth.RequireAuth] tell "middleware never ran" from "not logged in".
 type authResult struct {
-	// owner is the *Auth that verified this request. It is not a
-	// feature but a cheap belt-and-braces check (see [ctxKey]).
+	// owner is the *Auth that verified this request. A sentinel from a
+	// different *Auth is ignored rather than trusted, so a session valid
+	// under one cookie secret cannot authenticate a request through
+	// another (see [ctxKey] for why the key is package-scoped).
 	owner *Auth
 	// session is the verified payload, kept whole because a renewing
 	// mount nested inside a non-renewing one still needs the expiry
@@ -77,8 +79,8 @@ func (a *Auth) Authenticate(next http.Handler) http.Handler {
 // Cache-Control: private.
 //
 // It suppresses renewal only for the routes it alone serves: an
-// [Auth.Authenticate] nested inside it still renews, because the
-// renewal decision belongs to the strongest mount covering the route.
+// [Auth.Authenticate] nested inside it still renews (see the package
+// doc on middleware for why).
 //
 // At least one Authenticate mount must sit in the user's normal
 // browsing path, or sessions expire a full lifetime after login no
@@ -171,7 +173,7 @@ func (a *Auth) verifySession(r *http.Request) authResult {
 // browsing path.
 func (a *Auth) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Only this Auth's own sentinel is trusted (see [ctxKey]).
+		// Only this Auth's own sentinel is trusted (see [authResult]).
 		res, verified := r.Context().Value(ctxKey{}).(authResult)
 		if !verified || res.owner != a {
 			// No Authenticate mount ran, so nothing has written the

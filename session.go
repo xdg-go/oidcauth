@@ -32,10 +32,9 @@ const (
 )
 
 // errBadCookie reports that a signed cookie was absent, malformed,
-// tampered with, or expired. The library's rejection reasons are
-// distinct error values that all wrap errBadCookie, so a caller would
-// match with errors.Is(err, errBadCookie) and never on the specific
-// reason. It stays unexported until an exported API returns it.
+// tampered with, or expired. Every rejection reason below wraps it, so
+// the package presents one external failure while logs name the
+// specific cause. It stays unexported until an exported API returns it.
 var errBadCookie = errors.New("oidcauth: invalid or expired cookie")
 
 // Rejection reasons. Each wraps errBadCookie so that external
@@ -357,9 +356,7 @@ func randomToken() string {
 // rule each caller has to remember.
 //
 // Set, not Add: it deliberately overwrites the weaker "private" that
-// the middleware writes at entry when it finds a valid session. A
-// handler that later overwrites Cache-Control itself still wins, and
-// the library does not prevent that (see the README).
+// the middleware writes at entry when it finds a valid session.
 func markSessionResponse(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "private, no-store")
 }

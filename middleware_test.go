@@ -308,8 +308,6 @@ func TestRequireAuthIgnoresForeignSentinel(t *testing.T) {
 	}
 }
 
-// --- Sliding renewal (Phase 3.2) ---
-
 // renewalFixture mints a session at base with a fresh Auth whose clock
 // is settable, and returns the Auth, the minted cookie, and a function
 // that moves the clock. The session lifetime is 1h and the max 24h (see
@@ -904,8 +902,8 @@ func TestConcurrentRequestsSameCookie(t *testing.T) {
 	wg.Wait()
 }
 
-// TestNoRenewalWithoutValidSession pins the other half of 3.3: every
-// way a session can fail to verify must also skip renewal. Where an
+// TestNoRenewalWithoutValidSession pins the converse of the renewal
+// rule: every way a session can fail to verify must also skip renewal. Where an
 // expiry is verifiable at all (the cases whose payload decodes and is
 // not deliberately in the past), it sits inside the renew window, so
 // a cookie that verified would certainly be renewed.

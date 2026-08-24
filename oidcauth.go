@@ -49,9 +49,9 @@
 //   - [WithSessionMaxLifetime] (365d) counts from first login for a cookie
 //     and never moves. Renewal will not extend a session past max lifetime.
 //
-// Renewal extends cookie expiration.  It does not re-authentication. Claims
-// freeze at login, so a user disabled at the provider keeps a valid session
-// until the max lifetime.
+// Renewal extends the cookie's expiration; it does not re-authenticate.
+// Claims freeze at login, so a user disabled at the provider keeps a
+// valid session until the max lifetime.
 //
 // [New] requires renew window <= lifetime <= max lifetime and fails
 // rather than substituting defaults.
@@ -229,21 +229,17 @@ type Auth struct {
 type Option func(*Auth) error
 
 // WithSessionLifetime sets how long a session cookie lives from each
-// time it is written (default 90 days). The deadline slides forward
-// whenever [Auth.Authenticate] renews the cookie, which it does on the
-// first request arriving within the renew window before the expiry
-// (see [WithSessionRenewWindow], default 45 days), so an active user
-// keeps moving the deadline while an idle one expires somewhere
-// between one renew window and a full lifetime after their last
-// request -- sooner if the max lifetime cuts it short: that request
-// either renewed the cookie, setting the expiry a full lifetime out,
-// or left an expiry still more than a renew window away. Must be positive, must not be shorter than the renew
-// window, and must not exceed the maximum set by
-// [WithSessionMaxLifetime]; since that maximum defaults to 365 days, a
-// lifetime longer than 365 days fails construction even if the maximum
-// was never set explicitly. Since the renew window defaults to 45
-// days, a lifetime shorter than 45 days fails construction unless
-// [WithSessionRenewWindow] is set too.
+// write (default 90 days). The deadline slides: [Auth.Authenticate]
+// renews on the first request arriving within the renew window before
+// the expiry (see [WithSessionRenewWindow], default 45 days). So an
+// active user keeps moving the deadline, while an idle user's session
+// ends between one renew window and one full lifetime after their last
+// request -- sooner if the max lifetime cuts it short.
+//
+// Must be positive, at least the renew window, and no longer than
+// [WithSessionMaxLifetime]. Both bounds apply at their defaults, so a
+// lifetime above 365 days or below 45 days fails construction unless
+// the corresponding option is set too.
 func WithSessionLifetime(d time.Duration) Option {
 	return func(a *Auth) error {
 		if d <= 0 {
@@ -264,15 +260,10 @@ func WithSessionLifetime(d time.Duration) Option {
 // Setting the window equal to the session lifetime renews on every
 // request, which is the true last-request idle timeout: the deadline
 // always sits exactly one lifetime after the user's most recent
-// request. Until the max lifetime tail described below, it costs a
-// Set-Cookie on every authenticated response, and per the cache rules
-// every such response is marked Cache-Control: private, no-store.
-//
-// As a session approaches the max lifetime, a renewal's new expiry is
-// clamped to the max lifetime deadline. Once the expiry is pinned
-// there, any later renewal computes the same expiry and skips the
-// rewrite, so the tail costs at most one extra cookie write and never
-// pushes a session past the max.
+// request. Until the session nears its max lifetime (see
+// [WithSessionMaxLifetime]), it costs a Set-Cookie on every
+// authenticated response, and per the cache rules every such response
+// is marked Cache-Control: private, no-store.
 //
 // Must be positive and must not exceed the session lifetime.
 func WithSessionRenewWindow(d time.Duration) Option {
@@ -290,8 +281,10 @@ func WithSessionRenewWindow(d time.Duration) Option {
 // renewal preserves the original issue time, so no amount of activity
 // pushes a session past it. It is enforced on every verify, so a
 // cookie still inside its own lifetime is rejected once it reaches the
-// maximum, exactly as an expired one is; a renewed cookie's expiry is
-// clamped to it as well. The deadline is computed from the issue time
+// maximum, exactly as an expired one is. A renewal's expiry is clamped
+// to this deadline; once pinned there, later renewals compute the same
+// expiry and skip the rewrite, so the tail costs at most one extra
+// cookie write and never pushes a session past the max. The deadline is computed from the issue time
 // stored in each cookie, so lowering it applies to sessions already
 // minted. Must be positive and must not be shorter than the session
 // lifetime.
