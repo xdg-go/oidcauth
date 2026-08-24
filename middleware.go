@@ -94,54 +94,39 @@ func (a *Auth) authenticate(next http.Handler, renew bool) http.Handler {
 		varyOnCookie(w)
 		// Reuse this Auth's own sentinel when an outer mount already
 		// verified the request, so nesting the middlewares verifies
-		// the cookie exactly once. The renewal decision belongs to
-		// the strongest mount, not the outermost: a renewing mount
-		// nested inside a non-renewing one (or inside RequireAuth's
-		// inline verify) still renews, as long as no mount has made
-		// that decision yet. So: one verification, at most one
-		// session Set-Cookie.
-		if res, verified := r.Context().Value(ctxKey{}).(authResult); verified && res.owner == a {
-			// Skip when a renewal was already recorded: that
-			// response carries a session cookie and is marked
-			// "private, no-store", which Set would downgrade.
-			if res.ok && !res.renewed {
-				markPrivateResponse(w)
-				if renew {
-					a.renewSessionCookie(w, res.session, res.at)
-					res.renewed = true
-					r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, res))
-				}
-			}
-			next.ServeHTTP(w, r)
-			return
+		// the cookie exactly once.
+		res, verified := r.Context().Value(ctxKey{}).(authResult)
+		if !verified || res.owner != a {
+			res = a.verifySession(r)
 		}
-		// One clock reading covers verification and the renewal
-		// decision, so a request cannot straddle the moment a session
-		// expires.
-		now := a.now()
-		s, err := a.sessionFromRequestAt(r, now)
-		// A verified session means the response may depend on who is
-		// logged in, so it must not be shared-cached. Anonymous
-		// requests keep whatever Cache-Control the app chose. A
-		// renewal below upgrades this to "private, no-store".
-		if err == nil {
+		// The renewal decision belongs to the strongest mount, not the
+		// outermost: a renewing mount nested inside a non-renewing one
+		// (or inside RequireAuth's inline verify) still renews, as long
+		// as no mount has made that decision yet. Once one has, the
+		// response may already carry a session cookie and the
+		// "private, no-store" that goes with it, which
+		// markPrivateResponse would downgrade. So: one verification,
+		// at most one session Set-Cookie, and the cache header written
+		// once, before any cookie.
+		if res.ok && !res.renewed {
 			markPrivateResponse(w)
+			if renew {
+				// Renewal happens before the handler runs, so the
+				// Set-Cookie cannot lose a race with headers the
+				// handler writes.
+				a.renewSessionCookie(w, res.session, res.at)
+				res.renewed = true
+			}
 		}
-		// Renewal happens before the handler runs, so the Set-Cookie
-		// cannot lose a race with headers the handler writes.
-		if err == nil && renew {
-			a.renewSessionCookie(w, s, now)
-		}
-		res := authResult{owner: a, session: s, ok: err == nil, at: now, renewed: renew}
 		next.ServeHTTP(w, r.WithContext(
 			context.WithValue(r.Context(), ctxKey{}, res)))
 	})
 }
 
-// verifySession is the inline verify used by [Auth.RequireAuth] when
-// no Authenticate mount ran. It never renews, so the sentinel it
-// returns leaves the renewal decision open for a renewing mount
-// nested below it.
+// verifySession verifies the cookie under a single clock reading, so a
+// request cannot straddle the moment a session expires. It never
+// renews, so the sentinel it returns leaves the renewal decision open
+// for the caller, or for a renewing mount nested below it.
 func (a *Auth) verifySession(r *http.Request) authResult {
 	now := a.now()
 	s, err := a.sessionFromRequestAt(r, now)

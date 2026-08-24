@@ -368,9 +368,9 @@ func markSessionResponse(w http.ResponseWriter) {
 // shared-cacheable.
 //
 // It must not run after a session cookie was written on the same
-// response: Set would downgrade "private, no-store" to "private". The
-// fresh-verify path orders it before renewal; the sentinel-hit path
-// in [Auth.authenticate] skips it once a renewal is recorded.
+// response: Set would downgrade "private, no-store" to "private".
+// [Auth.authenticate] has the only ordering that matters, and writes
+// it in one place, before any renewal.
 func markPrivateResponse(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "private")
 }
