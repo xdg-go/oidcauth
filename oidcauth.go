@@ -228,6 +228,22 @@ type Auth struct {
 // Option customizes an [Auth].
 type Option func(*Auth) error
 
+// checkSessionDuration rejects a session duration the cookie payload
+// cannot represent. Expiry and IssuedAt are both stored in whole
+// seconds, so a sub-second remainder is silently truncated away: a
+// 100ms lifetime would mint a cookie already expired on arrival, and
+// any fractional value shortens by an amount that depends on the
+// current wall-clock offset.
+func checkSessionDuration(name string, d time.Duration) error {
+	if d < time.Second {
+		return fmt.Errorf("oidcauth: %s must be at least 1s, got %v", name, d)
+	}
+	if d%time.Second != 0 {
+		return fmt.Errorf("oidcauth: %s must be a whole number of seconds, got %v", name, d)
+	}
+	return nil
+}
+
 // WithSessionLifetime sets how long a session cookie lives from each
 // write (default 90 days). The deadline slides: [Auth.Authenticate]
 // renews on the first request arriving within the renew window before
@@ -236,14 +252,14 @@ type Option func(*Auth) error
 // ends between one renew window and one full lifetime after their last
 // request -- sooner if the max lifetime cuts it short.
 //
-// Must be positive, at least the renew window, and no longer than
-// [WithSessionMaxLifetime]. Both bounds apply at their defaults, so a
+// Must be a whole number of seconds of at least 1s, at least the
+// renew window, and no longer than [WithSessionMaxLifetime]. Both bounds apply at their defaults, so a
 // lifetime above 365 days or below 45 days fails construction unless
 // the corresponding option is set too.
 func WithSessionLifetime(d time.Duration) Option {
 	return func(a *Auth) error {
-		if d <= 0 {
-			return errors.New("oidcauth: session lifetime must be positive")
+		if err := checkSessionDuration("session lifetime", d); err != nil {
+			return err
 		}
 		a.sessionLifetime = d
 		return nil
@@ -265,11 +281,12 @@ func WithSessionLifetime(d time.Duration) Option {
 // authenticated response, and per the cache rules every such response
 // is marked Cache-Control: private, no-store.
 //
-// Must be positive and must not exceed the session lifetime.
+// Must be a whole number of seconds of at least 1s and must not
+// exceed the session lifetime.
 func WithSessionRenewWindow(d time.Duration) Option {
 	return func(a *Auth) error {
-		if d <= 0 {
-			return errors.New("oidcauth: session renew window must be positive")
+		if err := checkSessionDuration("session renew window", d); err != nil {
+			return err
 		}
 		a.renewWindow = d
 		return nil
@@ -286,12 +303,12 @@ func WithSessionRenewWindow(d time.Duration) Option {
 // expiry and skip the rewrite, so the tail costs at most one extra
 // cookie write and never pushes a session past the max. The deadline is computed from the issue time
 // stored in each cookie, so lowering it applies to sessions already
-// minted. Must be positive and must not be shorter than the session
-// lifetime.
+// minted. Must be a whole number of seconds of at least 1s and must
+// not be shorter than the session lifetime.
 func WithSessionMaxLifetime(d time.Duration) Option {
 	return func(a *Auth) error {
-		if d <= 0 {
-			return errors.New("oidcauth: session max lifetime must be positive")
+		if err := checkSessionDuration("session max lifetime", d); err != nil {
+			return err
 		}
 		a.maxSessionLifetime = d
 		return nil

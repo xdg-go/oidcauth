@@ -94,19 +94,23 @@ func TestOptionSettersCloneInputs(t *testing.T) {
 // validates its input.
 func TestOptionValidation(t *testing.T) {
 	cases := map[string]Option{
-		"zero session lifetime":     WithSessionLifetime(0),
-		"negative session lifetime": WithSessionLifetime(-time.Second),
-		"zero max lifetime":         WithSessionMaxLifetime(0),
-		"negative max lifetime":     WithSessionMaxLifetime(-time.Second),
-		"zero renew window":         WithSessionRenewWindow(0),
-		"negative renew window":     WithSessionRenewWindow(-time.Second),
-		"empty cookie name":         WithCookieName(""),
-		"relative login path":       WithLoginPath("in"),
-		"relative logout path":      WithLogoutPath("out"),
-		"relative post-logout":      WithPostLogoutRedirect("bye"),
-		"nil known func":            ForceApprovalIfNewUser(nil),
-		"empty consent params":      WithForceConsentParams(nil),
-		"no extra claim names":      WithExtraClaims(),
+		"zero session lifetime":       WithSessionLifetime(0),
+		"negative session lifetime":   WithSessionLifetime(-time.Second),
+		"zero max lifetime":           WithSessionMaxLifetime(0),
+		"negative max lifetime":       WithSessionMaxLifetime(-time.Second),
+		"zero renew window":           WithSessionRenewWindow(0),
+		"negative renew window":       WithSessionRenewWindow(-time.Second),
+		"sub-second session lifetime": WithSessionLifetime(100 * time.Millisecond),
+		"fractional session lifetime": WithSessionLifetime(1500 * time.Millisecond),
+		"sub-second max lifetime":     WithSessionMaxLifetime(500 * time.Microsecond),
+		"fractional renew window":     WithSessionRenewWindow(90500 * time.Millisecond),
+		"empty cookie name":           WithCookieName(""),
+		"relative login path":         WithLoginPath("in"),
+		"relative logout path":        WithLogoutPath("out"),
+		"relative post-logout":        WithPostLogoutRedirect("bye"),
+		"nil known func":              ForceApprovalIfNewUser(nil),
+		"empty consent params":        WithForceConsentParams(nil),
+		"no extra claim names":        WithExtraClaims(),
 	}
 	for name, opt := range cases {
 		if err := opt(&Auth{}); err == nil {

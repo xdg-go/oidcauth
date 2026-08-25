@@ -493,3 +493,26 @@ func TestRenewSessionCookieWindow(t *testing.T) {
 		})
 	}
 }
+
+// TestMintedSessionSurvivesSubSecondClock guards the whole-second
+// validation from the other side: with a clock carrying nanoseconds, a
+// freshly minted cookie at the shortest accepted lifetime must still
+// verify rather than truncate itself into the past.
+func TestMintedSessionSurvivesSubSecondClock(t *testing.T) {
+	a := authWithLoginPath()
+	a.sessionLifetime = time.Second
+	a.renewWindow = time.Second
+	a.maxSessionLifetime = 2 * time.Second
+	at := time.Date(2026, 8, 21, 0, 0, 0, 999999999, time.UTC)
+	a.now = func() time.Time { return at }
+
+	rr := httptest.NewRecorder()
+	a.setSessionCookie(rr, User{Sub: "s1"})
+	c := recordedCookie(t, rr, a.sessionCookieName)
+
+	req := httptest.NewRequest(http.MethodGet, "/page", nil)
+	req.AddCookie(c)
+	if _, err := a.sessionFromRequestAt(req, at); err != nil {
+		t.Fatalf("freshly minted session rejected at a sub-second clock: %v", err)
+	}
+}
