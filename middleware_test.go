@@ -65,7 +65,7 @@ func TestRequireAuthPassesValidSession(t *testing.T) {
 	want := User{Sub: "s1", Email: "e@example.com", Name: "N"}
 	rr0 := httptest.NewRecorder()
 	a.setSessionCookie(rr0, want)
-	c := recordedCookie(t, rr0, a.sessionCookieName)
+	c := recordedCookie(t, rr0, a.sessionName())
 
 	var got User
 	req := httptest.NewRequest(http.MethodGet, "/private", nil)
@@ -85,7 +85,7 @@ func TestRequireAuthRejectsExpiredSession(t *testing.T) {
 	a := authWithLoginPath()
 	rr0 := httptest.NewRecorder()
 	a.setSessionCookie(rr0, User{Sub: "s1"})
-	c := recordedCookie(t, rr0, a.sessionCookieName)
+	c := recordedCookie(t, rr0, a.sessionName())
 
 	a.now = func() time.Time { return time.Now().Add(a.sessionLifetime + time.Minute) }
 	var u User
@@ -125,7 +125,7 @@ func TestAuthenticatePassesUserOnPublicPage(t *testing.T) {
 	want := User{Sub: "s1"}
 	rr0 := httptest.NewRecorder()
 	a.setSessionCookie(rr0, want)
-	c := recordedCookie(t, rr0, a.sessionCookieName)
+	c := recordedCookie(t, rr0, a.sessionName())
 
 	var got User
 	var ok bool
@@ -144,7 +144,7 @@ func TestAuthenticateNoRenewPopulatesContext(t *testing.T) {
 	want := User{Sub: "s1"}
 	rr0 := httptest.NewRecorder()
 	a.setSessionCookie(rr0, want)
-	c := recordedCookie(t, rr0, a.sessionCookieName)
+	c := recordedCookie(t, rr0, a.sessionName())
 
 	var got User
 	var ok bool
@@ -175,7 +175,7 @@ func TestRequireAuthVerifiesExactlyOnce(t *testing.T) {
 		a := authWithLoginPath()
 		rr0 := httptest.NewRecorder()
 		a.setSessionCookie(rr0, User{Sub: "s1"})
-		return a, recordedCookie(t, rr0, a.sessionCookieName)
+		return a, recordedCookie(t, rr0, a.sessionName())
 	}
 	run := func(t *testing.T, wrap bool) int {
 		t.Helper()
@@ -222,7 +222,7 @@ func TestNestedAuthenticateVerifiesOnce(t *testing.T) {
 	a := authWithLoginPath()
 	rr0 := httptest.NewRecorder()
 	a.setSessionCookie(rr0, User{Sub: "s1"})
-	c := recordedCookie(t, rr0, a.sessionCookieName)
+	c := recordedCookie(t, rr0, a.sessionName())
 
 	var clockReads int
 	countingClock(a, &clockReads)
@@ -254,7 +254,7 @@ func TestRequireAuthRejectsWrappedInvalidSession(t *testing.T) {
 		a := authWithLoginPath()
 		rr0 := httptest.NewRecorder()
 		a.setSessionCookie(rr0, User{Sub: "s1"})
-		c := recordedCookie(t, rr0, a.sessionCookieName)
+		c := recordedCookie(t, rr0, a.sessionName())
 		a.now = func() time.Time { return time.Now().Add(a.sessionLifetime + time.Minute) }
 
 		var u User
@@ -270,7 +270,7 @@ func TestRequireAuthRejectsWrappedInvalidSession(t *testing.T) {
 		a := authWithLoginPath()
 		rr0 := httptest.NewRecorder()
 		a.setSessionCookie(rr0, User{Sub: "s1"})
-		c := recordedCookie(t, rr0, a.sessionCookieName)
+		c := recordedCookie(t, rr0, a.sessionName())
 		c.Value += "x" // breaks the HMAC
 
 		var u User
@@ -294,7 +294,7 @@ func TestRequireAuthIgnoresForeignSentinel(t *testing.T) {
 
 	rr0 := httptest.NewRecorder()
 	authA.setSessionCookie(rr0, User{Sub: "s1"})
-	c := recordedCookie(t, rr0, authA.sessionCookieName)
+	c := recordedCookie(t, rr0, authA.sessionName())
 
 	var u User
 	req := httptest.NewRequest(http.MethodGet, "/private", nil)
@@ -321,7 +321,7 @@ func renewalFixture(t *testing.T) (*Auth, *http.Cookie, func(time.Duration)) {
 
 	rr := httptest.NewRecorder()
 	a.setSessionCookie(rr, User{Sub: "s1"})
-	c := recordedCookie(t, rr, a.sessionCookieName)
+	c := recordedCookie(t, rr, a.sessionName())
 	return a, c, func(d time.Duration) { at = base.Add(d) }
 }
 
@@ -394,7 +394,7 @@ func TestRenewalSkippedBeforeRenewWindow(t *testing.T) {
 	if !*ok {
 		t.Fatal("fresh session not accepted")
 	}
-	if got := sessionCookieOrNil(rr, a.sessionCookieName); got != nil {
+	if got := sessionCookieOrNil(rr, a.sessionName()); got != nil {
 		t.Errorf("Set-Cookie written outside the renew window: %q", got.Raw)
 	}
 }
@@ -408,7 +408,7 @@ func TestRenewalInRenewWindowPreservesIssuedAt(t *testing.T) {
 	if !*ok {
 		t.Fatal("session not accepted inside the renew window")
 	}
-	renewed := sessionCookieOrNil(rr, a.sessionCookieName)
+	renewed := sessionCookieOrNil(rr, a.sessionName())
 	if renewed == nil {
 		t.Fatal("no Set-Cookie inside the renew window")
 	}
@@ -444,7 +444,7 @@ func TestRenewalWindowEqualToLifetimeRenewsEveryRequest(t *testing.T) {
 	if !*ok {
 		t.Fatal("session not accepted on the first request")
 	}
-	first := sessionCookieOrNil(rr, a.sessionCookieName)
+	first := sessionCookieOrNil(rr, a.sessionName())
 	if first == nil {
 		t.Fatal("no Set-Cookie on the first request")
 	}
@@ -457,7 +457,7 @@ func TestRenewalWindowEqualToLifetimeRenewsEveryRequest(t *testing.T) {
 	if !*ok {
 		t.Fatal("session not accepted on the second request")
 	}
-	second := sessionCookieOrNil(rr, a.sessionCookieName)
+	second := sessionCookieOrNil(rr, a.sessionName())
 	if second == nil {
 		t.Fatal("no Set-Cookie on the second consecutive request")
 	}
@@ -474,7 +474,7 @@ func TestRenewalRejectedPastSessionLifetime(t *testing.T) {
 	if *ok {
 		t.Error("session past the session lifetime was accepted")
 	}
-	if got := sessionCookieOrNil(rr, a.sessionCookieName); got != nil {
+	if got := sessionCookieOrNil(rr, a.sessionName()); got != nil {
 		t.Errorf("expired session renewed: %q", got.Raw)
 	}
 }
@@ -492,7 +492,7 @@ func TestRenewalRefusedPastMaxLifetime(t *testing.T) {
 	if *ok {
 		t.Error("session past the max lifetime was accepted")
 	}
-	if got := sessionCookieOrNil(rr, a.sessionCookieName); got != nil {
+	if got := sessionCookieOrNil(rr, a.sessionName()); got != nil {
 		t.Errorf("session past the max lifetime was renewed: %q", got.Raw)
 	}
 }
@@ -507,7 +507,7 @@ func TestRenewedExpiryClampedToMaxLifetime(t *testing.T) {
 	advance(31 * time.Minute) // renewal would otherwise reach +91m
 
 	rr, _ := serveAuthenticated(a, c, nil)
-	renewed := sessionCookieOrNil(rr, a.sessionCookieName)
+	renewed := sessionCookieOrNil(rr, a.sessionName())
 	if renewed == nil {
 		t.Fatal("no Set-Cookie inside the renew window")
 	}
@@ -531,7 +531,7 @@ func TestNoRewriteOncePinnedAtMaxLifetime(t *testing.T) {
 	advance(31 * time.Minute)
 
 	rr, _ := serveAuthenticated(a, c, nil)
-	pinned := sessionCookieOrNil(rr, a.sessionCookieName)
+	pinned := sessionCookieOrNil(rr, a.sessionName())
 	if pinned == nil {
 		t.Fatal("no Set-Cookie inside the renew window")
 	}
@@ -541,7 +541,7 @@ func TestNoRewriteOncePinnedAtMaxLifetime(t *testing.T) {
 	if !*ok {
 		t.Fatal("session inside the max lifetime was rejected")
 	}
-	if got := sessionCookieOrNil(rr2, a.sessionCookieName); got != nil {
+	if got := sessionCookieOrNil(rr2, a.sessionName()); got != nil {
 		t.Errorf("rewrote an identical cookie once pinned at the max lifetime: %q", got.Raw)
 	}
 }
@@ -566,7 +566,7 @@ func TestRenewalLandsWhenHandlerWritesBody(t *testing.T) {
 	if rr.Body.String() != "hello" {
 		t.Errorf("body = %q, want %q", rr.Body.String(), "hello")
 	}
-	if sessionCookieOrNil(rr, a.sessionCookieName) == nil {
+	if sessionCookieOrNil(rr, a.sessionName()) == nil {
 		t.Error("renewal Set-Cookie lost to a handler that wrote a body")
 	}
 }
@@ -588,7 +588,7 @@ func TestAuthenticateNoRenewNeverWritesCookie(t *testing.T) {
 	if !ok {
 		t.Fatal("session not accepted by AuthenticateNoRenew")
 	}
-	if got := sessionCookieOrNil(rr, a.sessionCookieName); got != nil {
+	if got := sessionCookieOrNil(rr, a.sessionName()); got != nil {
 		t.Errorf("AuthenticateNoRenew wrote a session cookie: %q", got.Raw)
 	}
 }
@@ -608,7 +608,7 @@ func TestRenewalWritesOneCookieWhenNested(t *testing.T) {
 
 	n := 0
 	for _, got := range rr.Result().Cookies() {
-		if got.Name == a.sessionCookieName {
+		if got.Name == a.sessionName() {
 			n++
 		}
 	}
@@ -638,7 +638,7 @@ func mintAgedSession(t *testing.T, a *Auth, base time.Time, d time.Duration) *ht
 	a.now = func() time.Time { return base.Add(-d) }
 	rr := httptest.NewRecorder()
 	a.setSessionCookie(rr, User{Sub: "s1"})
-	c := recordedCookie(t, rr, a.sessionCookieName)
+	c := recordedCookie(t, rr, a.sessionName())
 	a.now = func() time.Time { return base }
 	return c
 }
@@ -660,11 +660,11 @@ func TestLogoutInRenewWindowEmitsOneCookie(t *testing.T) {
 	if rr.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302", rr.Code)
 	}
-	got := sessionSetCookies(rr, a.sessionCookieName)
+	got := sessionSetCookies(rr, a.sessionName())
 	if len(got) != 1 {
 		t.Fatalf("session Set-Cookie count = %d, want 1: %q", len(got), got)
 	}
-	only := sessionCookieOrNil(rr, a.sessionCookieName)
+	only := sessionCookieOrNil(rr, a.sessionName())
 	if only == nil || only.Value != "" || only.MaxAge >= 0 {
 		t.Errorf("surviving cookie = %q, want the clearing one", got[0])
 	}
@@ -695,11 +695,11 @@ func TestCallbackInRenewWindowEmitsOneCookie(t *testing.T) {
 	if rr.Code != http.StatusFound {
 		t.Fatalf("callback status = %d, want 302: %s", rr.Code, rr.Body)
 	}
-	got := sessionSetCookies(rr, a.sessionCookieName)
+	got := sessionSetCookies(rr, a.sessionName())
 	if len(got) != 1 {
 		t.Fatalf("session Set-Cookie count = %d, want 1: %q", len(got), got)
 	}
-	minted := sessionCookieOrNil(rr, a.sessionCookieName)
+	minted := sessionCookieOrNil(rr, a.sessionName())
 	if minted == nil {
 		t.Fatal("no session cookie on the callback response")
 	}
@@ -730,11 +730,11 @@ func TestNoRenewOuterStillRenewsInner(t *testing.T) {
 	if !ok {
 		t.Fatal("session not accepted inside the renew window")
 	}
-	got := sessionSetCookies(rr, a.sessionCookieName)
+	got := sessionSetCookies(rr, a.sessionName())
 	if len(got) != 1 {
 		t.Fatalf("session Set-Cookie count = %d, want 1: %q", len(got), got)
 	}
-	renewed := decodeSession(t, a, sessionCookieOrNil(rr, a.sessionCookieName))
+	renewed := decodeSession(t, a, sessionCookieOrNil(rr, a.sessionName()))
 	if renewed.IssuedAt != before.IssuedAt {
 		t.Errorf("IssuedAt = %d, want %d (renewal must preserve it)", renewed.IssuedAt, before.IssuedAt)
 	}
@@ -760,11 +760,11 @@ func TestRequireAuthOuterStillRenewsInner(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
 	}
-	set := sessionSetCookies(rr, a.sessionCookieName)
+	set := sessionSetCookies(rr, a.sessionName())
 	if len(set) != 1 {
 		t.Fatalf("session Set-Cookie count = %d, want 1: %q", len(set), set)
 	}
-	renewed := decodeSession(t, a, sessionCookieOrNil(rr, a.sessionCookieName))
+	renewed := decodeSession(t, a, sessionCookieOrNil(rr, a.sessionName()))
 	if renewed.IssuedAt != before.IssuedAt {
 		t.Errorf("IssuedAt = %d, want %d (renewal must preserve it)", renewed.IssuedAt, before.IssuedAt)
 	}
@@ -787,7 +787,7 @@ func TestNoRenewInsideRenewingStillOneCookie(t *testing.T) {
 	inner := a.AuthenticateNoRenew(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	a.Authenticate(inner).ServeHTTP(rr, req)
 
-	if got := sessionSetCookies(rr, a.sessionCookieName); len(got) != 1 {
+	if got := sessionSetCookies(rr, a.sessionName()); len(got) != 1 {
 		t.Errorf("session Set-Cookie count = %d, want 1: %q", len(got), got)
 	}
 }
@@ -796,7 +796,7 @@ func TestNoRenewInsideRenewingStillOneCookie(t *testing.T) {
 // from a hand-built payload, so a test can mint payloads the normal
 // path never produces (no iat, a stale issue time).
 func signedSession(a *Auth, payload []byte) *http.Cookie {
-	return &http.Cookie{Name: a.sessionCookieName, Value: a.sign(purposeSession, payload)}
+	return &http.Cookie{Name: a.sessionName(), Value: a.sign(purposeSession, payload)}
 }
 
 // concurrentBodyHandler writes a body so each request exercises the
@@ -870,7 +870,7 @@ func TestConcurrentRequestsSameCookie(t *testing.T) {
 				if !*seenUser {
 					t.Errorf("%s: valid session not seen by handler", m.name)
 				}
-				set := sessionSetCookies(rr, a.sessionCookieName)
+				set := sessionSetCookies(rr, a.sessionName())
 				if !m.wantRenew {
 					if len(set) != 0 {
 						t.Errorf("%s: %d session Set-Cookie, want 0", m.name, len(set))
@@ -881,7 +881,7 @@ func TestConcurrentRequestsSameCookie(t *testing.T) {
 					t.Errorf("%s: %d session Set-Cookie, want exactly 1", m.name, len(set))
 					return
 				}
-				got, err := decodeSessionOrError(a, sessionCookieOrNil(rr, a.sessionCookieName))
+				got, err := decodeSessionOrError(a, sessionCookieOrNil(rr, a.sessionName()))
 				if err != nil {
 					t.Errorf("%s: %v", m.name, err)
 					return
@@ -946,7 +946,7 @@ func TestNoRenewalWithoutValidSession(t *testing.T) {
 	}{
 		{"absent cookie", nil},
 		{"bad signature", &tampered},
-		{"garbage value", &http.Cookie{Name: a.sessionCookieName, Value: "not-a-signed-cookie"}},
+		{"garbage value", &http.Cookie{Name: a.sessionName(), Value: "not-a-signed-cookie"}},
 		{"missing iat", signedSession(a, noIssuedAt)},
 		{"zero iat", signedSession(a, zeroIssuedAt)},
 		{"expired", signedSession(a, expired)},
@@ -964,7 +964,7 @@ func TestNoRenewalWithoutValidSession(t *testing.T) {
 			if *sawUser {
 				t.Error("invalid session accepted")
 			}
-			if set := sessionSetCookies(rr, a.sessionCookieName); len(set) != 0 {
+			if set := sessionSetCookies(rr, a.sessionName()); len(set) != 0 {
 				t.Errorf("renewal attempted on an invalid session: %q", set)
 			}
 		})
@@ -977,7 +977,7 @@ func TestNoRenewalWithoutValidSession(t *testing.T) {
 	if !*ok {
 		t.Fatal("control session not accepted")
 	}
-	if set := sessionSetCookies(rr, a.sessionCookieName); len(set) != 1 {
+	if set := sessionSetCookies(rr, a.sessionName()); len(set) != 1 {
 		t.Fatalf("control: %d session Set-Cookie, want 1", len(set))
 	}
 }

@@ -53,6 +53,21 @@ func main() {
 An `http://` redirect URL (local dev) turns off the cookie `Secure`
 flag. Use `oidcauth.New(cfg, opts...)` to configure from code.
 
+Cookies are named `_oidcauth` and `_oidcauth_state`
+(`oidcauth.WithCookieName` renames both). With `Secure` on they go on
+the wire as `__Host-_oidcauth` and `__Host-_oidcauth_state`; the
+`__Host-` prefix stops a sibling subdomain from shadowing them, and
+plain-http dev, where browsers would not honor it, uses the bare
+names.
+
+Upgrading to a version that adds the `__Host-` prefix logs every user
+out once: the renamed cookie makes existing sessions invisible, and
+the old bare-named cookie is ignored until it expires on its own. A
+login that is mid-redirect when the new build starts fails its
+callback and must be retried. This is a one-time break; reading both
+names would undo the shadowing protection the prefix exists to
+provide.
+
 ## Guide
 
 ### Protect routes
@@ -94,6 +109,11 @@ auth, err := oidcauth.NewFromEnv(
 	oidcauth.WithSessionMaxLifetime(90*24*time.Hour), // hard cap from login
 )
 ```
+
+Changing the session lifetime applies only to cookies minted or
+renewed afterward, because the expiry is baked in at write time.
+Changing the max lifetime applies retroactively: it is measured from
+the issue time stored in each cookie.
 
 Defaults are 90, 45, and 365 days. Renewal does not re-check the
 identity provider, so the max lifetime bounds how long a disabled

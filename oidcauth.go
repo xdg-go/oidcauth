@@ -252,6 +252,13 @@ func checkSessionDuration(name string, d time.Duration) error {
 // ends between one renew window and one full lifetime after their last
 // request -- sooner if the max lifetime cuts it short.
 //
+// The lifetime is applied when a cookie is written, so changing it
+// affects only cookies minted or renewed afterward: an existing
+// cookie keeps the expiry it was signed with until its next renewal.
+// The max lifetime differs -- it is computed from the issue time
+// stored in each cookie, so a change there applies retroactively to
+// sessions already minted.
+//
 // Must be a whole number of seconds of at least 1s, at least the
 // renew window, and no longer than [WithSessionMaxLifetime]. Both bounds apply at their defaults, so a
 // lifetime above 365 days or below 45 days fails construction unless
@@ -329,11 +336,26 @@ func WithLogger(l *slog.Logger) Option {
 }
 
 // WithCookieName sets the session cookie name (default "_oidcauth").
-// The state cookie is named "<name>_state".
+// The state cookie is named "<name>_state". Over a secure connection
+// both go on the wire with the "__Host-" prefix, as "__Host-<name>"
+// and "__Host-<name>_state"; plain-http dev, where the prefix would
+// not be honored, uses the bare names. Pass the name without the
+// prefix: supplying it is rejected rather than doubled.
 func WithCookieName(name string) Option {
 	return func(a *Auth) error {
 		if name == "" {
 			return errors.New("oidcauth: cookie name must not be empty")
+		}
+		// Browsers apply the prefix rules case-insensitively
+		// (rfc6265bis 5.7), so match that way too: a bare "__host-sess"
+		// under http dev would be silently dropped by the browser, with
+		// no server-side error to explain the login loop. "__Secure-"
+		// carries its own browser rule and is not this package's to
+		// hand out, so reject it on the same grounds.
+		for _, prefix := range []string{hostCookiePrefix, secureCookiePrefix} {
+			if len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix) {
+				return fmt.Errorf("oidcauth: cookie name must not begin with %q; the %q prefix is added automatically for secure cookies", prefix, hostCookiePrefix)
+			}
 		}
 		a.sessionCookieName = name
 		return nil

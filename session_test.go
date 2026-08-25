@@ -46,7 +46,7 @@ func TestSessionCookieRoundTrip(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	a.setSessionCookie(rr, want)
-	c := recordedCookie(t, rr, a.sessionCookieName)
+	c := recordedCookie(t, rr, a.sessionName())
 
 	if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteLaxMode {
 		t.Errorf("cookie flags: HttpOnly=%v Secure=%v SameSite=%v", c.HttpOnly, c.Secure, c.SameSite)
@@ -66,7 +66,7 @@ func TestSessionCookieInsecureForHTTPDev(t *testing.T) {
 	a.secureCookies = false
 	rr := httptest.NewRecorder()
 	a.setSessionCookie(rr, User{Sub: "s"})
-	if c := recordedCookie(t, rr, a.sessionCookieName); c.Secure {
+	if c := recordedCookie(t, rr, a.sessionName()); c.Secure {
 		t.Errorf("dev (http) cookie must not set Secure")
 	}
 }
@@ -75,7 +75,7 @@ func TestSessionCookieTamperDetected(t *testing.T) {
 	a := cookieAuth(testCookieKey)
 	rr := httptest.NewRecorder()
 	a.setSessionCookie(rr, User{Sub: "s1"})
-	c := recordedCookie(t, rr, a.sessionCookieName)
+	c := recordedCookie(t, rr, a.sessionName())
 
 	// Flip a payload character; the HMAC must catch it.
 	mutated := *c
@@ -107,7 +107,7 @@ func TestSessionCookieTamperDetected(t *testing.T) {
 func TestSessionCookieSignedGarbageRejected(t *testing.T) {
 	a := cookieAuth(testCookieKey)
 	c := &http.Cookie{
-		Name:  a.sessionCookieName,
+		Name:  a.sessionName(),
 		Value: a.sign(purposeSession, []byte("not json")),
 	}
 	if _, err := a.sessionFromRequestAt(requestWithCookie(c), a.now()); err == nil {
@@ -119,7 +119,7 @@ func TestSessionCookieWrongKeyRejected(t *testing.T) {
 	a := cookieAuth(testCookieKey)
 	rr := httptest.NewRecorder()
 	a.setSessionCookie(rr, User{Sub: "s1"})
-	c := recordedCookie(t, rr, a.sessionCookieName)
+	c := recordedCookie(t, rr, a.sessionName())
 
 	other := cookieAuth("ffffffffffffffffffffffffffffffff")
 	if _, err := other.sessionFromRequestAt(requestWithCookie(c), other.now()); err == nil {
@@ -131,7 +131,7 @@ func TestSessionCookieExpiryEnforced(t *testing.T) {
 	a := cookieAuth(testCookieKey)
 	rr := httptest.NewRecorder()
 	a.setSessionCookie(rr, User{Sub: "s1"})
-	c := recordedCookie(t, rr, a.sessionCookieName)
+	c := recordedCookie(t, rr, a.sessionName())
 
 	a.now = func() time.Time { return time.Now().Add(a.sessionLifetime + time.Minute) }
 	if _, err := a.sessionFromRequestAt(requestWithCookie(c), a.now()); err == nil {
@@ -147,7 +147,7 @@ func TestPurposeSeparation(t *testing.T) {
 	a.setStateCookie(rr, statePayload{State: "s", Nonce: "n"})
 	stateC := recordedCookie(t, rr, a.stateCookieName())
 
-	forged := &http.Cookie{Name: a.sessionCookieName, Value: stateC.Value}
+	forged := &http.Cookie{Name: a.sessionName(), Value: stateC.Value}
 	if _, err := a.sessionFromRequestAt(requestWithCookie(forged), a.now()); err == nil {
 		t.Errorf("state cookie accepted as session cookie")
 	}
@@ -246,7 +246,7 @@ func TestSessionPayloadIssuedAtRoundTrip(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	a.setSessionCookie(rr, User{Sub: "s1"})
-	c := recordedCookie(t, rr, a.sessionCookieName)
+	c := recordedCookie(t, rr, a.sessionName())
 
 	payload, err := a.verify(purposeSession, c.Value)
 	if err != nil {
@@ -305,7 +305,7 @@ func TestSessionCookieSingleClockReading(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	a.setSessionCookie(rr, User{Sub: "s1"})
-	c := recordedCookie(t, rr, a.sessionCookieName)
+	c := recordedCookie(t, rr, a.sessionName())
 
 	payload, err := a.verify(purposeSession, c.Value)
 	if err != nil {
@@ -358,7 +358,7 @@ func TestSessionIssuedAtRequired(t *testing.T) {
 			a := cookieAuth(testCookieKey)
 			a.now = func() time.Time { return mint }
 			cookie := &http.Cookie{
-				Name:  a.sessionCookieName,
+				Name:  a.sessionName(),
 				Value: a.sign(purposeSession, []byte(c.payload)),
 			}
 			s, err := a.sessionFromRequestAt(requestWithCookie(cookie), mint)
@@ -373,6 +373,44 @@ func TestSessionIssuedAtRequired(t *testing.T) {
 	}
 }
 
+// TestSessionFutureIssuedAtTolerated pins the clock-skew rule: the
+// HMAC proves the library minted the cookie, so an IssuedAt ahead of
+// the verifying instance's clock can only be skew between instances,
+// and it must never lock the user out. The max lifetime just lands
+// later by the skew.
+func TestSessionFutureIssuedAtTolerated(t *testing.T) {
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name string
+		skew time.Duration
+	}{
+		{name: "no skew", skew: 0},
+		{name: "seconds ahead", skew: 30 * time.Second},
+		{name: "hours ahead", skew: 6 * time.Hour},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := cookieAuth(testCookieKey)
+			mint := now.Add(c.skew)
+			a.now = func() time.Time { return mint }
+
+			rr := httptest.NewRecorder()
+			a.setSessionCookie(rr, User{Sub: "s1"})
+			cookie := recordedCookie(t, rr, a.sessionName())
+
+			s, err := a.sessionFromRequestAt(requestWithCookie(cookie), now)
+			if err != nil {
+				t.Fatalf("cookie issued %v ahead rejected: %v", c.skew, err)
+			}
+			want := mint.Truncate(time.Second).Add(a.maxSessionLifetime)
+			if got := a.maxLifetimeDeadline(s); !got.Equal(want) {
+				t.Errorf("maxLifetimeDeadline = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 // TestFreshSessionCookieAccepted is the positive control for the
 // IssuedAt gate: a cookie minted by the library itself verifies.
 func TestFreshSessionCookieAccepted(t *testing.T) {
@@ -382,7 +420,7 @@ func TestFreshSessionCookieAccepted(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	a.setSessionCookie(rr, User{Sub: "s1"})
-	c := recordedCookie(t, rr, a.sessionCookieName)
+	c := recordedCookie(t, rr, a.sessionName())
 
 	if _, err := a.sessionFromRequestAt(requestWithCookie(c), mint); err != nil {
 		t.Fatalf("freshly minted cookie rejected: %v", err)
@@ -399,7 +437,7 @@ func TestSessionIssuedAtTamperDetected(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	a.setSessionCookie(rr, User{Sub: "s1"})
-	c := recordedCookie(t, rr, a.sessionCookieName)
+	c := recordedCookie(t, rr, a.sessionName())
 
 	payload, err := a.verify(purposeSession, c.Value)
 	if err != nil {
@@ -483,7 +521,7 @@ func TestRenewSessionCookieWindow(t *testing.T) {
 			a.renewSessionCookie(rr, s, now)
 			var got bool
 			for _, c := range rr.Result().Cookies() {
-				if c.Name == a.sessionCookieName {
+				if c.Name == a.sessionName() {
 					got = true
 				}
 			}
@@ -508,11 +546,137 @@ func TestMintedSessionSurvivesSubSecondClock(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	a.setSessionCookie(rr, User{Sub: "s1"})
-	c := recordedCookie(t, rr, a.sessionCookieName)
+	c := recordedCookie(t, rr, a.sessionName())
 
 	req := httptest.NewRequest(http.MethodGet, "/page", nil)
 	req.AddCookie(c)
 	if _, err := a.sessionFromRequestAt(req, at); err != nil {
 		t.Fatalf("freshly minted session rejected at a sub-second clock: %v", err)
+	}
+}
+
+// TestHostCookiePrefix pins the wire names: with secure cookies both
+// the session and state cookies carry the "__Host-" prefix, and the
+// read and clear paths use the same name they wrote.
+func TestHostCookiePrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		secure      bool
+		wantSession string
+		wantState   string
+	}{
+		{"secure", true, "__Host-_oidcauth", "__Host-_oidcauth_state"},
+		{"http dev", false, "_oidcauth", "_oidcauth_state"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := cookieAuth(testCookieKey)
+			a.secureCookies = tc.secure
+
+			rr := httptest.NewRecorder()
+			a.setSessionCookie(rr, User{Sub: "s1"})
+			a.setStateCookie(rr, statePayload{State: "s", Nonce: "n"})
+			sess := recordedCookie(t, rr, tc.wantSession)
+			recordedCookie(t, rr, tc.wantState)
+
+			if _, err := a.sessionFromRequestAt(requestWithCookie(sess), a.now()); err != nil {
+				t.Errorf("sessionFromRequestAt: %v", err)
+			}
+
+			rr = httptest.NewRecorder()
+			a.clearSessionCookie(rr)
+			a.clearStateCookie(rr)
+			if got := recordedCookie(t, rr, tc.wantSession); got.Value != "" {
+				t.Errorf("cleared session cookie value = %q, want empty", got.Value)
+			}
+			if got := recordedCookie(t, rr, tc.wantState); got.Value != "" {
+				t.Errorf("cleared state cookie value = %q, want empty", got.Value)
+			}
+		})
+	}
+}
+
+// TestHostPrefixedSessionIgnoresBareName guards the read path: under
+// secure cookies a cookie sent under the unprefixed name is not a
+// session, so a subdomain cannot shadow one.
+func TestHostPrefixedSessionIgnoresBareName(t *testing.T) {
+	a := cookieAuth(testCookieKey)
+	rr := httptest.NewRecorder()
+	a.setSessionCookie(rr, User{Sub: "s1"})
+	c := recordedCookie(t, rr, a.sessionName())
+
+	bare := *c
+	bare.Name = a.sessionCookieName
+	if _, err := a.sessionFromRequestAt(requestWithCookie(&bare), a.now()); !errors.Is(err, errNoCookie) {
+		t.Errorf("err = %v, want %v", err, errNoCookie)
+	}
+}
+
+// TestCookieMaxAge pins Max-Age on every cookie this package writes:
+// it must agree with Expires, and deletions must carry MaxAge < 0
+// (net/http encodes that as "Max-Age=0") alongside a past Expires.
+func TestCookieMaxAge(t *testing.T) {
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	a := cookieAuth(testCookieKey)
+	a.now = func() time.Time { return now }
+
+	// A renewal clamped to the max lifetime is the only write where
+	// Max-Age and Expires can disagree: exp is pinned to the
+	// whole-second deadline while now carries a fraction. Put the
+	// deadline 300ms out, close enough that rounding would have
+	// produced Max-Age=0 and dropped the attribute.
+	clampNow := now.Add(-300 * time.Millisecond)
+	clampIssuedAt := now.Add(-a.maxSessionLifetime).Unix()
+
+	writes := map[string]struct {
+		write       func(w http.ResponseWriter)
+		name        string
+		wantMaxAge  int
+		wantExpires time.Time // zero means now.Add(wantMaxAge seconds)
+	}{
+		"session set":   {func(w http.ResponseWriter) { a.setSessionCookie(w, User{Sub: "s1"}) }, a.sessionName(), int(a.sessionLifetime / time.Second), time.Time{}},
+		"session clear": {a.clearSessionCookie, a.sessionName(), -1, time.Time{}},
+		"state set": {func(w http.ResponseWriter) {
+			a.setStateCookie(w, statePayload{State: "s", Nonce: "n"})
+		}, a.stateCookieName(), int(stateTTL / time.Second), time.Time{}},
+		"state clear": {a.clearStateCookie, a.stateCookieName(), -1, time.Time{}},
+		"renewal": {func(w http.ResponseWriter) {
+			a.renewSessionCookie(w, sessionPayload{
+				User:     User{Sub: "s1"},
+				Expiry:   now.Add(time.Minute),
+				IssuedAt: now.Add(-time.Hour).Unix(),
+			}, now)
+		}, a.sessionName(), int(a.sessionLifetime / time.Second), time.Time{}},
+		"renewal clamped to max lifetime": {func(w http.ResponseWriter) {
+			a.renewSessionCookie(w, sessionPayload{
+				User: User{Sub: "s1"},
+				// Just short of the deadline, so the clamped expiry is
+				// still an advance and the renewal is not skipped.
+				Expiry:   clampNow.Add(200 * time.Millisecond),
+				IssuedAt: clampIssuedAt,
+			}, clampNow)
+		}, a.sessionName(), 1, now},
+	}
+	for name, tc := range writes {
+		t.Run(name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			tc.write(rr)
+			c := recordedCookie(t, rr, tc.name)
+			if c.MaxAge != tc.wantMaxAge {
+				t.Errorf("MaxAge = %d, want %d", c.MaxAge, tc.wantMaxAge)
+			}
+			// Expires must say the same thing as Max-Age, so a client
+			// honoring either one behaves identically.
+			wantExpires := tc.wantExpires
+			switch {
+			case !wantExpires.IsZero():
+			case tc.wantMaxAge < 0:
+				wantExpires = expiredCookieTime
+			default:
+				wantExpires = now.Add(time.Duration(tc.wantMaxAge) * time.Second)
+			}
+			if !c.Expires.Equal(wantExpires) {
+				t.Errorf("Expires = %v, want %v", c.Expires, wantExpires)
+			}
+		})
 	}
 }

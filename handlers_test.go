@@ -80,7 +80,7 @@ func finishLogin(t *testing.T, a *Auth, idp *fakeIDP, authURL *url.URL, stateCoo
 func sessionCookie(t *testing.T, a *Auth, rr *httptest.ResponseRecorder) *http.Cookie {
 	t.Helper()
 	for _, c := range rr.Result().Cookies() {
-		if c.Name == a.sessionCookieName && c.Value != "" {
+		if c.Name == a.sessionName() && c.Value != "" {
 			return c
 		}
 	}
@@ -482,7 +482,7 @@ func TestLogoutClearsSession(t *testing.T) {
 	}
 	cleared := false
 	for _, c := range rr.Result().Cookies() {
-		if c.Name == a.sessionCookieName && c.MaxAge < 0 {
+		if c.Name == a.sessionName() && c.MaxAge < 0 {
 			cleared = true
 		}
 	}
@@ -503,7 +503,7 @@ func TestLogoutRejectsGET(t *testing.T) {
 		t.Fatalf("status = %d, want 405", rr.Code)
 	}
 	for _, c := range rr.Result().Cookies() {
-		if c.Name == a.sessionCookieName && c.MaxAge < 0 {
+		if c.Name == a.sessionName() && c.MaxAge < 0 {
 			t.Errorf("GET logout cleared the session cookie")
 		}
 	}
@@ -519,7 +519,7 @@ func TestClearSession(t *testing.T) {
 	a.ClearSession(rr)
 	cleared := false
 	for _, c := range rr.Result().Cookies() {
-		if c.Name == a.sessionCookieName && c.MaxAge < 0 {
+		if c.Name == a.sessionName() && c.MaxAge < 0 {
 			cleared = true
 		}
 	}

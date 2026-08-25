@@ -31,7 +31,7 @@ func TestRenewedResponseIsUncacheable(t *testing.T) {
 	if !*ok {
 		t.Fatal("session not accepted")
 	}
-	if sessionCookieOrNil(rr, a.sessionCookieName) == nil {
+	if sessionCookieOrNil(rr, a.sessionName()) == nil {
 		t.Fatal("no renewal Set-Cookie, so this test proves nothing")
 	}
 	wantCacheHeaders(t, rr, "private, no-store", []string{"Cookie"})
@@ -45,7 +45,7 @@ func TestValidSessionWithoutRenewalIsPrivate(t *testing.T) {
 	if !*ok {
 		t.Fatal("session not accepted")
 	}
-	if got := sessionCookieOrNil(rr, a.sessionCookieName); got != nil {
+	if got := sessionCookieOrNil(rr, a.sessionName()); got != nil {
 		t.Fatalf("unexpected renewal Set-Cookie: %q", got.Raw)
 	}
 	wantCacheHeaders(t, rr, "private", []string{"Cookie"})
@@ -163,7 +163,7 @@ func TestNestedAuthenticateUpgradesToNoStore(t *testing.T) {
 		}
 	}))).ServeHTTP(rr, req)
 
-	if sessionCookieOrNil(rr, a.sessionCookieName) == nil {
+	if sessionCookieOrNil(rr, a.sessionName()) == nil {
 		t.Fatal("no renewal Set-Cookie, so this test proves nothing")
 	}
 	wantCacheHeaders(t, rr, "private, no-store", []string{"Cookie"})
@@ -262,7 +262,7 @@ func TestNoRenewInsideRenewingKeepsNoStore(t *testing.T) {
 		}
 	}))).ServeHTTP(rr, req)
 
-	if sessionCookieOrNil(rr, a.sessionCookieName) == nil {
+	if sessionCookieOrNil(rr, a.sessionName()) == nil {
 		t.Fatal("no renewal Set-Cookie, so this test proves nothing")
 	}
 	wantCacheHeaders(t, rr, "private, no-store", []string{"Cookie"})

@@ -225,19 +225,19 @@ sentinel-hit branch in `Auth.authenticate` reverses that order.
 
 ### 3.5 Cookie attributes
 
-- [ ] Use the `__Host-` cookie name prefix when `secureCookies` is true.
+- [x] Use the `__Host-` cookie name prefix when `secureCookies` is true.
       Per draft-ietf-httpbis-rfc6265bis-22 §5.7 the browser stores such
       a cookie only when it is `Secure`, host-only, and `Path=/`; the
       real requirement is host-only, and omitting `Domain` is how you
       get it. Path is already `/` with no Domain, so this blocks
       subdomain cookie shadowing
-- [ ] Set `Max-Age` alongside `Expires`. rfc6265bis §4.1.2.2: "If a
+- [x] Set `Max-Age` alongside `Expires`. rfc6265bis §4.1.2.2: "If a
       cookie has both the Max-Age and the Expires attribute, the Max-Age
       attribute has precedence." `Max-Age` is relative and so immune to
       client clock skew; keep `Expires` for ancient clients
-- [ ] Decide the clock-skew rule for `IssuedAt` in the future across
+- [x] Decide the clock-skew rule for `IssuedAt` in the future across
       instances (the MAC means skew is the only cause) and document it
-- [ ] Document that a session-lifetime change applies only to cookies
+- [x] Document that a session-lifetime change applies only to cookies
       minted or renewed afterward; the max lifetime, keyed on stored
       `IssuedAt`, does apply retroactively
 

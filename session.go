@@ -31,6 +31,10 @@ const (
 	stateTTL = 15 * time.Minute
 )
 
+// expiredCookieTime is the Expires attribute of a deleted cookie: the
+// past, so a client that ignores Max-Age still drops it.
+var expiredCookieTime = time.Unix(0, 0).UTC()
+
 // errBadCookie reports that a signed cookie was absent, malformed,
 // tampered with, or expired. Every rejection reason below wraps it, so
 // the package presents one external failure while logs name the
@@ -128,11 +132,32 @@ func (a *Auth) verify(purpose, value string) ([]byte, error) {
 	return payload, nil
 }
 
-func (a *Auth) stateCookieName() string { return a.sessionCookieName + "_state" }
+// hostCookiePrefix marks a cookie the browser stores only when it is
+// Secure, host-only (no Domain), and Path=/ (rfc6265bis 5.7). These
+// cookies are already written that way, so the prefix costs nothing
+// and stops a sibling subdomain from shadowing them.
+const hostCookiePrefix = "__Host-"
+
+// secureCookiePrefix is the weaker sibling of hostCookiePrefix
+// (rfc6265bis 5.7). This package never writes it; it is named only so
+// [WithCookieName] can reject a name carrying it.
+const secureCookiePrefix = "__Secure-"
+
+// sessionName is the session cookie name as it goes on the wire. The
+// prefix only holds over a secure connection, so plain-http dev keeps
+// the bare name.
+func (a *Auth) sessionName() string {
+	if a.secureCookies {
+		return hostCookiePrefix + a.sessionCookieName
+	}
+	return a.sessionCookieName
+}
+
+func (a *Auth) stateCookieName() string { return a.sessionName() + "_state" }
 
 func (a *Auth) setSessionCookie(w http.ResponseWriter, u User) {
 	now := a.now()
-	a.writeSessionCookie(w, u, now.Unix(), now.Add(a.sessionLifetime))
+	a.writeSessionCookie(w, u, now.Unix(), now.Add(a.sessionLifetime), now)
 }
 
 // writeSessionCookie signs and writes one session cookie with the
@@ -145,16 +170,31 @@ func (a *Auth) setSessionCookie(w http.ResponseWriter, u User) {
 // lifetime deadline computed from IssuedAt, and renewal's "already at
 // the max" guard would skip the clamping rewrite, leaving a cookie
 // advertising an expiry the server would refuse to honor.
-func (a *Auth) writeSessionCookie(w http.ResponseWriter, u User, issuedAt int64, exp time.Time) {
+//
+// now is the instant exp was computed from; Max-Age is its distance to
+// exp, so the caller must not re-read the clock for it.
+func (a *Auth) writeSessionCookie(w http.ResponseWriter, u User, issuedAt int64, exp, now time.Time) {
 	exp = exp.Truncate(time.Second)
+	// Truncate, not round: Max-Age must never outlast Expires. Floor at
+	// one second while the cookie is still live, because net/http omits
+	// Max-Age entirely when it is zero -- a renewal clamped to within a
+	// second of the max lifetime deadline would otherwise ship with
+	// Expires alone and lose the clock-skew immunity Max-Age buys.
+	maxAge := int(exp.Sub(now).Truncate(time.Second) / time.Second)
+	if maxAge < 1 && exp.After(now) {
+		maxAge = 1
+	}
 	markSessionResponse(w)
 	payload, _ := json.Marshal(sessionPayload{User: u, Expiry: exp, IssuedAt: issuedAt})
 	a.dropPendingSessionCookie(w)
 	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for http://localhost dev)
-		Name:     a.sessionCookieName,
-		Value:    a.sign(purposeSession, payload),
-		Path:     "/",
-		Expires:  exp,
+		Name:    a.sessionName(),
+		Value:   a.sign(purposeSession, payload),
+		Path:    "/",
+		Expires: exp,
+		// Max-Age is relative, so a skewed client clock cannot make the
+		// cookie expire early or late.
+		MaxAge:   maxAge,
 		HttpOnly: true,
 		Secure:   a.secureCookies,
 		SameSite: http.SameSiteLaxMode,
@@ -174,7 +214,7 @@ func (a *Auth) dropPendingSessionCookie(w http.ResponseWriter) {
 	pending := w.Header()["Set-Cookie"]
 	kept := pending[:0]
 	for _, v := range pending {
-		if setCookieName(v) != a.sessionCookieName {
+		if setCookieName(v) != a.sessionName() {
 			kept = append(kept, v)
 		}
 	}
@@ -204,9 +244,10 @@ func (a *Auth) clearSessionCookie(w http.ResponseWriter) {
 	markSessionResponse(w)
 	a.dropPendingSessionCookie(w)
 	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for http://localhost dev)
-		Name:     a.sessionCookieName,
+		Name:     a.sessionName(),
 		Value:    "",
 		Path:     "/",
+		Expires:  expiredCookieTime,
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   a.secureCookies,
@@ -222,7 +263,7 @@ func (a *Auth) clearSessionCookie(w http.ResponseWriter) {
 // rejection reason lives here, so renewal can never act on a session
 // the verify path would refuse.
 func (a *Auth) sessionFromRequestAt(r *http.Request, now time.Time) (sessionPayload, error) {
-	c, err := r.Cookie(a.sessionCookieName)
+	c, err := r.Cookie(a.sessionName())
 	if err != nil {
 		// Not logged: an absent session cookie is every anonymous
 		// request, and logging it would bury the reasons that carry
@@ -260,6 +301,14 @@ func (a *Auth) sessionFromRequestAt(r *http.Request, now time.Time) (sessionPayl
 
 // maxLifetimeDeadline is the instant a session dies no matter how
 // active the user is: its original issue time plus the max lifetime.
+//
+// An IssuedAt in the future is tolerated, never rejected. The HMAC
+// proves this library minted the cookie, so a future issue time can
+// only mean clock skew between instances -- an ops problem the user
+// cannot fix and must not be locked out for. The deadline simply
+// lands later by the skew, so such a session outlives its nominal max
+// lifetime by that much. Instances are expected to run NTP, which
+// keeps the skew far below any sane max lifetime.
 func (a *Auth) maxLifetimeDeadline(s sessionPayload) time.Time {
 	return time.Unix(s.IssuedAt, 0).Add(a.maxSessionLifetime)
 }
@@ -285,7 +334,7 @@ func (a *Auth) renewSessionCookie(w http.ResponseWriter, s sessionPayload, now t
 	if !exp.After(s.Expiry) {
 		return
 	}
-	a.writeSessionCookie(w, s.User, s.IssuedAt, exp)
+	a.writeSessionCookie(w, s.User, s.IssuedAt, exp, now)
 }
 
 func (a *Auth) setStateCookie(w http.ResponseWriter, s statePayload) {
@@ -296,6 +345,7 @@ func (a *Auth) setStateCookie(w http.ResponseWriter, s statePayload) {
 		Name:     a.stateCookieName(),
 		Value:    a.sign(purposeState, payload),
 		Path:     "/",
+		Expires:  s.Expiry,
 		MaxAge:   int(stateTTL / time.Second),
 		HttpOnly: true,
 		Secure:   a.secureCookies,
@@ -309,6 +359,7 @@ func (a *Auth) clearStateCookie(w http.ResponseWriter) {
 		Name:     a.stateCookieName(),
 		Value:    "",
 		Path:     "/",
+		Expires:  expiredCookieTime,
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   a.secureCookies,
