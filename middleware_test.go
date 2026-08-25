@@ -820,8 +820,8 @@ func concurrentBodyHandler(t *testing.T, seenUser *bool) http.Handler {
 //
 // The renewal path is race-free by construction: it reads only
 // immutable *Auth configuration (sessionLifetime, maxSessionLifetime,
-// cookieSecret, cookie name) plus a per-request clock reading, and
-// writes only to that request's ResponseWriter. The authResult
+// the cookie key ring, cookie name) plus a per-request clock reading,
+// and writes only to that request's ResponseWriter. The authResult
 // sentinel is a value copied into a per-request context, never shared.
 // Corruption of shared state would therefore have to show up as a
 // wrong per-response outcome, which is what the assertions below pin:

@@ -584,3 +584,34 @@ func TestSanitizeNext(t *testing.T) {
 		}
 	}
 }
+
+// A login that started before rotation must still complete: the state
+// cookie it is carrying was signed with the now-retired secret.
+func TestCallbackAcceptsStateCookieFromPreviousSecret(t *testing.T) {
+	idp := newFakeIDP(t)
+	newAuth := func(secret string, previous ...string) *Auth {
+		t.Helper()
+		a, err := New(Config{
+			Issuer: idp.srv.URL, ClientID: testClientID, ClientSecret: "test-secret",
+			RedirectURL: testRedirectURL, CookieSecret: secret,
+			PreviousCookieSecrets: previous,
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return a
+	}
+
+	before := newAuth(testRetiredKey)
+	authURL, stateCookie := startLogin(t, before, "/auth/login")
+
+	after := newAuth(testCookieKey, testRetiredKey)
+
+	rr := finishLogin(t, after, idp, authURL, stateCookie)
+	if rr.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, want 302", rr.Code)
+	}
+	if sessionCookie(t, after, rr) == nil {
+		t.Errorf("callback set no session cookie")
+	}
+}

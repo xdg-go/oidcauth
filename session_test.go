@@ -16,9 +16,16 @@ import (
 
 // cookieAuth builds an Auth with just enough state for cookie tests,
 // skipping OIDC discovery.
-func cookieAuth(secret string) *Auth {
+// The variadic previous secrets are verify-only, mirroring
+// Config.PreviousCookieSecrets.
+func cookieAuth(secret string, previous ...string) *Auth {
+	verifyKeys := [][]byte{[]byte(secret)}
+	for _, prev := range previous {
+		verifyKeys = append(verifyKeys, []byte(prev))
+	}
 	return &Auth{
-		cookieSecret:       []byte(secret),
+		signingKey:         []byte(secret),
+		verifyKeys:         verifyKeys,
 		secureCookies:      true,
 		sessionCookieName:  "_oidcauth",
 		sessionLifetime:    time.Hour,
@@ -676,6 +683,115 @@ func TestCookieMaxAge(t *testing.T) {
 			}
 			if !c.Expires.Equal(wantExpires) {
 				t.Errorf("Expires = %v, want %v", c.Expires, wantExpires)
+			}
+		})
+	}
+}
+
+// testRetiredKey is the pre-rotation secret in the key-ring tests;
+// testCookieKey plays the freshly rotated-in one.
+const testRetiredKey = "fedcba9876543210fedcba9876543210" // 32 bytes
+
+// testOlderRetiredKey is the secret retired one rotation before
+// testRetiredKey, so it lands at ring index 2.
+const testOlderRetiredKey = "89abcdef0123456789abcdef01234567" // 32 bytes
+
+// testForeignKey is in no position of any ring under test.
+const testForeignKey = "00112233445566770011223344556677" // 32 bytes
+
+func TestSessionCookieVerifiesAcrossKeyRotation(t *testing.T) {
+	signedWith := func(secret string) *http.Cookie {
+		signer := cookieAuth(secret)
+		rr := httptest.NewRecorder()
+		signer.setSessionCookie(rr, User{Sub: "s1"})
+		return recordedCookie(t, rr, signer.sessionName())
+	}
+
+	cases := []struct {
+		name    string
+		cookie  *http.Cookie
+		auth    *Auth
+		wantErr bool
+	}{
+		{name: "old key still in the ring", cookie: signedWith(testRetiredKey),
+			auth: cookieAuth(testCookieKey, testRetiredKey)},
+		// Index 2 exercises the tail of the verify list, which an
+		// off-by-one or a truncated ring would never reach.
+		{name: "second previous key in the ring", cookie: signedWith(testOlderRetiredKey),
+			auth: cookieAuth(testCookieKey, testRetiredKey, testOlderRetiredKey)},
+		{name: "old key retired", cookie: signedWith(testRetiredKey),
+			auth: cookieAuth(testCookieKey), wantErr: true},
+		// A multi-key ring must still reject. This is the case that
+		// catches an accumulator that accepts unconditionally rather
+		// than only when some key matched.
+		{name: "key in no position of the ring", cookie: signedWith(testForeignKey),
+			auth: cookieAuth(testCookieKey, testRetiredKey, testOlderRetiredKey), wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.auth.sessionFromRequestAt(requestWithCookie(tc.cookie), tc.auth.now())
+			if tc.wantErr {
+				if !errors.Is(err, errBadSignature) {
+					t.Errorf("err = %v, want bad signature", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("sessionFromRequestAt: %v", err)
+			}
+		})
+	}
+}
+
+// A session minted before rotation must survive retirement of the key
+// that minted it, provided it renewed while that key was still in the
+// ring: renewal signs with the current key, not the one on the cookie.
+func TestRenewalReSignsWithCurrentSecret(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	old := cookieAuth(testRetiredKey)
+	old.now = func() time.Time { return start }
+	rr := httptest.NewRecorder()
+	old.setSessionCookie(rr, User{Sub: "s1"})
+	minted := recordedCookie(t, rr, old.sessionName())
+
+	// Rotate, then land a request inside the renew window (lifetime 1h,
+	// window 30m).
+	rotated := cookieAuth(testCookieKey, testRetiredKey)
+	now := start.Add(45 * time.Minute)
+	rotated.now = func() time.Time { return now }
+	s, err := rotated.sessionFromRequestAt(requestWithCookie(minted), now)
+	if err != nil {
+		t.Fatalf("sessionFromRequestAt: %v", err)
+	}
+	rr = httptest.NewRecorder()
+	rotated.renewSessionCookie(rr, s, now)
+	renewed := recordedCookie(t, rr, rotated.sessionName())
+
+	retired := cookieAuth(testCookieKey)
+	retired.now = func() time.Time { return now }
+	if _, err := retired.sessionFromRequestAt(requestWithCookie(renewed), now); err != nil {
+		t.Errorf("renewed cookie rejected after retiring the minting key: %v", err)
+	}
+}
+
+func TestNewRejectsBadPreviousCookieSecret(t *testing.T) {
+	cases := []struct {
+		name     string
+		previous []string
+		wantErr  string
+	}{
+		{name: "too short", previous: []string{"short"}, wantErr: "32 bytes"},
+		{name: "empty entry", previous: []string{testRetiredKey, ""}, wantErr: "empty entry"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New(Config{
+				Issuer: "https://auth.example.com", ClientID: "app", ClientSecret: "s",
+				RedirectURL: testRedirectURL, CookieSecret: testCookieKey,
+				PreviousCookieSecrets: tc.previous,
+			})
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("err = %v, want error containing %q", err, tc.wantErr)
 			}
 		})
 	}

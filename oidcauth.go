@@ -56,6 +56,26 @@
 // [New] requires renew window <= lifetime <= max lifetime and fails
 // rather than substituting defaults.
 //
+// # Cookie secret rotation
+//
+// To rotate: move the current CookieSecret into
+// [Config.PreviousCookieSecrets], set a fresh CookieSecret, deploy.
+// New cookies are signed by the new key while cookies signed by the old
+// one still verify, so nobody is logged out and no in-flight login
+// breaks.
+//
+// Retire the old key one full session lifetime after the last instance
+// still signing with it is gone; a staggered rollout or a rollback
+// keeps minting old-key cookies past the start of the deploy. One
+// lifetime suffices because a cookie signed at or before that moment
+// carries an expiry no later than its signing time plus the session
+// lifetime, so every cookie the old key can still verify has expired.
+//
+// Rotation is therefore not revocation. Dropping the old key
+// immediately, rather than a lifetime later, is the logout-everyone
+// kill switch -- and the only in-band one until per-session issue time
+// is exposed to applications.
+//
 // # Caching
 //
 // Set-Cookie does not stop a shared cache from storing and replaying a
@@ -130,12 +150,30 @@ type Config struct {
 	// CookieSecret is the HMAC key for state and session cookies.
 	// It must be at least 32 bytes, e.g. from `openssl rand -hex 32`.
 	CookieSecret string
+	// PreviousCookieSecrets are retired HMAC keys that still verify
+	// state and session cookies but never sign new ones, so a secret
+	// can be rotated without logging every user out or breaking a
+	// login mid-redirect. Each entry has the same 32-byte minimum as
+	// CookieSecret; an empty entry is a config error, not a skipped
+	// one. The ring is uncapped: an unauthenticated request bearing a
+	// garbage cookie costs one HMAC per key, so a long ring is a work
+	// multiplier an attacker can lean on. Keeping it short is the
+	// operator's call, not the library's.
+	//
+	// Rotation is not revocation: cookies signed by a retired key stay
+	// valid until that key leaves the ring. See the package Cookie
+	// secret rotation section for the procedure and its timing.
+	PreviousCookieSecrets []string
 }
 
 // FromEnv builds a Config from the environment:
 //
 //	AUTH_ISSUER, AUTH_CLIENT_ID, AUTH_CLIENT_SECRET,
 //	AUTH_REDIRECT_URL, AUTH_COOKIE_SECRET
+//
+// AUTH_COOKIE_SECRET_PREVIOUS is optional: a comma-separated list of
+// retired secrets that still verify cookies. Unset means no retired
+// secrets, which is the ordinary steady state.
 //
 // It returns an error naming every missing variable.
 func FromEnv() (Config, error) {
@@ -145,6 +183,17 @@ func FromEnv() (Config, error) {
 		ClientSecret: os.Getenv("AUTH_CLIENT_SECRET"),
 		RedirectURL:  os.Getenv("AUTH_REDIRECT_URL"),
 		CookieSecret: os.Getenv("AUTH_COOKIE_SECRET"),
+	}
+	// Split only a non-empty value: strings.Split("", ",") yields one
+	// empty element, which construction would then reject as an empty
+	// secret. Trim each entry so the natural "key1, key2" spelling does
+	// not install " key2", which is long enough to pass the 32-byte
+	// check yet verifies nothing; a trimmed-to-empty entry is still
+	// passed through so construction rejects it.
+	if prev := os.Getenv("AUTH_COOKIE_SECRET_PREVIOUS"); prev != "" {
+		for _, s := range strings.Split(prev, ",") {
+			cfg.PreviousCookieSecrets = append(cfg.PreviousCookieSecrets, strings.TrimSpace(s))
+		}
 	}
 	var missing []string
 	for _, v := range []struct{ name, val string }{
@@ -203,7 +252,12 @@ type Auth struct {
 	discErr     error     // last failed attempt's error
 	lastAttempt time.Time // when discErr was recorded
 
-	cookieSecret  []byte
+	// signingKey signs every cookie; verifyKeys verifies them, holding
+	// signingKey first and then Config.PreviousCookieSecrets in order,
+	// newest first. Keeping "which key signs" a separate field makes
+	// it unambiguous.
+	signingKey    []byte
+	verifyKeys    [][]byte
 	secureCookies bool
 
 	sessionCookieName  string
@@ -491,6 +545,21 @@ func New(cfg Config, opts ...Option) (*Auth, error) {
 		return nil, fmt.Errorf("oidcauth: cookie secret must be at least 32 bytes, got %d",
 			len(cfg.CookieSecret))
 	}
+	verifyKeys := [][]byte{[]byte(cfg.CookieSecret)}
+	for i, prev := range cfg.PreviousCookieSecrets {
+		// An empty entry is nearly always a stray comma in
+		// AUTH_COOKIE_SECRET_PREVIOUS, so say that rather than report a
+		// zero length at a list position the operator never wrote.
+		if prev == "" {
+			return nil, fmt.Errorf("oidcauth: previous cookie secrets contain an empty entry; " +
+				"check AUTH_COOKIE_SECRET_PREVIOUS for a stray comma")
+		}
+		if len(prev) < 32 {
+			return nil, fmt.Errorf("oidcauth: previous cookie secret %d must be at least 32 bytes, got %d",
+				i, len(prev))
+		}
+		verifyKeys = append(verifyKeys, []byte(prev))
+	}
 	callbackPath, secure, err := parseRedirectURL(cfg.RedirectURL)
 	if err != nil {
 		return nil, err
@@ -505,7 +574,8 @@ func New(cfg Config, opts ...Option) (*Auth, error) {
 		},
 		issuer:             cfg.Issuer,
 		httpClient:         &http.Client{Timeout: httpTimeout},
-		cookieSecret:       []byte(cfg.CookieSecret),
+		signingKey:         []byte(cfg.CookieSecret),
+		verifyKeys:         verifyKeys,
 		secureCookies:      secure,
 		sessionCookieName:  "_oidcauth",
 		sessionLifetime:    90 * 24 * time.Hour,

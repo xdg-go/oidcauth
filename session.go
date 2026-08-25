@@ -99,7 +99,7 @@ type statePayload struct {
 
 func (a *Auth) sign(purpose string, payload []byte) string {
 	b64 := base64.RawURLEncoding.EncodeToString(payload)
-	mac := hmac.New(sha256.New, a.cookieSecret)
+	mac := hmac.New(sha256.New, a.signingKey)
 	mac.Write([]byte(purpose + "." + b64))
 	return b64 + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
@@ -120,9 +120,18 @@ func (a *Auth) verify(purpose, value string) ([]byte, error) {
 	if err != nil {
 		return nil, errMalformedPayload
 	}
-	mac := hmac.New(sha256.New, a.cookieSecret)
-	mac.Write([]byte(purpose + "." + b64))
-	if subtle.ConstantTimeCompare(gotMAC, mac.Sum(nil)) != 1 {
+	// Try every key in the ring, current first, and never break early:
+	// a loop that stopped on the matching key would leak through
+	// timing which key verified, i.e. roughly how old the cookie is.
+	// matched is an OR of per-key constant-time compares, so it stays
+	// 0 for an empty ring -- an empty ring accepts nothing.
+	matched := 0
+	for _, key := range a.verifyKeys {
+		mac := hmac.New(sha256.New, key)
+		mac.Write([]byte(purpose + "." + b64))
+		matched |= subtle.ConstantTimeCompare(gotMAC, mac.Sum(nil))
+	}
+	if matched != 1 {
 		return nil, errBadSignature
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(b64)

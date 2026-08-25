@@ -248,38 +248,38 @@ session and state cookies, so rotating it logs out every user at once
 and breaks any login mid-redirect. That makes the only global kill
 switch too expensive to rehearse.
 
-- [ ] Add `Config.PreviousCookieSecrets []string`, verify-only. Keep
+- [x] Add `Config.PreviousCookieSecrets []string`, verify-only. Keep
       `CookieSecret` as the one that signs, so "which key signs" is never
       ambiguous
-- [ ] `FromEnv` reads `AUTH_COOKIE_SECRET_PREVIOUS` as a comma-separated
+- [x] `FromEnv` reads `AUTH_COOKIE_SECRET_PREVIOUS` as a comma-separated
       list; absent is fine, unlike the required `AUTH_COOKIE_SECRET`
-- [ ] Replace `a.cookieSecret` with a signing key plus an ordered verify
+- [x] Replace `a.cookieSecret` with a signing key plus an ordered verify
       list; `sign` uses the signing key, `verify` tries each in turn with
       `subtle.ConstantTimeCompare`. Both cookie purposes get this for
       free -- `sign`/`verify` are already purpose-scoped and shared
-- [ ] Validate each entry at construction with the existing 32-byte rule,
+- [x] Validate each entry at construction with the existing 32-byte rule,
       and reject empty entries rather than skipping them
-- [ ] Do not cap the ring size. Document the cost instead: an
+- [x] Do not cap the ring size. Document the cost instead: an
       unauthenticated request with a garbage cookie costs one HMAC per
       key, so a long ring is a work multiplier an attacker can lean on.
       Keeping it short is the operator's call, not the library's
-- [ ] Document the rotation procedure: move the current secret into
+- [x] Document the rotation procedure: move the current secret into
       `PreviousCookieSecrets`, set a fresh `CookieSecret`, deploy. Retire
       the old key one full session lifetime later -- by then every live
       session has renewed at least once and been re-signed, and a session
       idle for almost the whole lifetime is the worst case that still needs
       the old key
-- [ ] Document that rotation is *not* revocation. Old cookies stay valid
+- [x] Document that rotation is *not* revocation. Old cookies stay valid
       until the old key is retired; dropping it immediately is the
       logout-everyone kill switch, and is the only in-band one until
       Phase 4 lands
-- [ ] **Test**: a cookie signed with a previous secret verifies; the same
+- [x] **Test**: a cookie signed with a previous secret verifies; the same
       cookie fails once that secret leaves the ring
-- [ ] **Test**: renewal re-signs with the current secret, so a renewed
+- [x] **Test**: renewal re-signs with the current secret, so a renewed
       cookie survives retirement of the key that minted it
-- [ ] **Test**: a state cookie minted before rotation still completes its
+- [x] **Test**: a state cookie minted before rotation still completes its
       callback after rotation
-- [ ] **Test**: construction rejects a previous secret shorter than 32
+- [x] **Test**: construction rejects a previous secret shorter than 32
       bytes
 
 ---

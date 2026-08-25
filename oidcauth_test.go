@@ -194,6 +194,67 @@ func TestNewFromEnv(t *testing.T) {
 	}
 }
 
+// TestFromEnvPreviousCookieSecrets covers the AUTH_COOKIE_SECRET_PREVIOUS
+// parse: unset means no ring, entries are trimmed so operator spacing
+// does not install a key that verifies nothing, and an entry that trims
+// to empty is a construction error rather than a silent skip.
+func TestFromEnvPreviousCookieSecrets(t *testing.T) {
+	otherKey := "fedcba9876543210fedcba9876543210" // 32 bytes
+	// A ring of two distinct keys, so New's multi-entry path is
+	// exercised rather than the same secret listed twice.
+	thirdKey := "89abcdef0123456789abcdef01234567" // 32 bytes
+	setBaseEnv := func(t *testing.T) {
+		t.Helper()
+		for k, v := range map[string]string{
+			"AUTH_ISSUER":        "https://auth.example.com",
+			"AUTH_CLIENT_ID":     testClientID,
+			"AUTH_CLIENT_SECRET": "test-secret",
+			"AUTH_REDIRECT_URL":  testRedirectURL,
+			"AUTH_COOKIE_SECRET": testCookieKey,
+		} {
+			t.Setenv(k, v)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		env  string // "" means unset
+		want []string
+	}{
+		{"unset", "", nil},
+		{"single", otherKey, []string{otherKey}},
+		{"multiple", otherKey + "," + thirdKey, []string{otherKey, thirdKey}},
+		{"spaced", " " + otherKey + " , " + thirdKey + " ", []string{otherKey, thirdKey}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setBaseEnv(t)
+			t.Setenv("AUTH_COOKIE_SECRET_PREVIOUS", tc.env)
+			cfg, err := FromEnv()
+			if err != nil {
+				t.Fatalf("FromEnv: %v", err)
+			}
+			if !reflect.DeepEqual(cfg.PreviousCookieSecrets, tc.want) {
+				t.Fatalf("PreviousCookieSecrets = %q, want %q", cfg.PreviousCookieSecrets, tc.want)
+			}
+			if _, err := New(cfg); err != nil {
+				t.Errorf("New: %v", err)
+			}
+		})
+	}
+
+	t.Run("trailing comma", func(t *testing.T) {
+		setBaseEnv(t)
+		t.Setenv("AUTH_COOKIE_SECRET_PREVIOUS", otherKey+",")
+		cfg, err := FromEnv()
+		if err != nil {
+			t.Fatalf("FromEnv: %v", err)
+		}
+		if _, err := New(cfg); err == nil {
+			t.Error("New accepted a trailing comma; want an empty-entry error")
+		}
+	})
+}
+
 // TestNewRejectsBadRedirectURL covers New's redirect-parse error branch.
 func TestNewRejectsBadRedirectURL(t *testing.T) {
 	_, err := New(Config{
