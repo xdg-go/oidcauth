@@ -279,3 +279,34 @@ func TestMarkPrivateResponseNeverDowngrades(t *testing.T) {
 		t.Errorf("Cache-Control = %q, want %q", got, "private, no-store")
 	}
 }
+
+// TestNoRenewPreservesOuterNoStore covers an outer security
+// middleware that already forbade all caching: marking the response
+// private must merge into that policy, never replace it.
+func TestNoRenewPreservesOuterNoStore(t *testing.T) {
+	a, c, advance := renewalFixture(t)
+	advance(29 * time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/page", nil)
+	req.AddCookie(c)
+	rr := httptest.NewRecorder()
+	rr.Header().Set("Cache-Control", "no-store")
+	a.AuthenticateNoRenew(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(rr, req)
+
+	wantCacheHeaders(t, rr, "no-store, private", []string{"Cookie"})
+}
+
+// TestNoRenewKeepsExistingPrivate checks the merge does not duplicate
+// a directive the outer policy already carries, whatever its spelling.
+func TestNoRenewKeepsExistingPrivate(t *testing.T) {
+	a, c, advance := renewalFixture(t)
+	advance(29 * time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/page", nil)
+	req.AddCookie(c)
+	rr := httptest.NewRecorder()
+	rr.Header().Set("Cache-Control", "no-store, Private")
+	a.AuthenticateNoRenew(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(rr, req)
+
+	wantCacheHeaders(t, rr, "no-store, Private", []string{"Cookie"})
+}

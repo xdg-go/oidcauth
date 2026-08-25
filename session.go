@@ -358,17 +358,35 @@ func markSessionResponse(w http.ResponseWriter) {
 }
 
 // markPrivateResponse marks a response as unshareable because its body
-// may depend on who is logged in.
-//
-// The no-store guard is unreachable today -- [Auth.verifyOnce] is the
-// only caller and runs before anything writes a cookie. Keep it: it
-// makes "a cookie write is never downgraded" a property of these two
-// functions instead of a call-order rule a later caller has to know.
+// may depend on who is logged in. It merges "private" into whatever
+// Cache-Control an outer middleware already set rather than replacing
+// it, so an existing "no-store" (or any other directive) survives.
 func markPrivateResponse(w http.ResponseWriter) {
-	if w.Header().Get("Cache-Control") == noStoreCacheControl {
+	existing := w.Header().Get("Cache-Control")
+	if existing == "" {
+		w.Header().Set("Cache-Control", "private")
 		return
 	}
-	w.Header().Set("Cache-Control", "private")
+	if hasCacheDirective(existing, "private") {
+		return
+	}
+	w.Header().Set("Cache-Control", existing+", private")
+}
+
+// hasCacheDirective reports whether a Cache-Control value already
+// carries the named directive. Directive names are case-insensitive
+// and comma-separated; a directive may carry an "=" argument.
+func hasCacheDirective(value, name string) bool {
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if i := strings.IndexByte(part, '='); i >= 0 {
+			part = part[:i]
+		}
+		if strings.EqualFold(part, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // varyOnCookie tells caches that this response may differ per cookie.
