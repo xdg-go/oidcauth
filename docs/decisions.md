@@ -378,46 +378,31 @@ full rule is renew window <= session lifetime <= max lifetime.
 
 A session cookie's `iat` is HMAC-covered and only ever written from
 `now.Unix()`, so an `IssuedAt` ahead of the verifying instance's clock
-cannot be forgery — it can only be clock skew between instances behind
-the same load balancer. The verify path therefore accepts it and
-computes the max-lifetime deadline from the stored issue time as
-usual: a skewed cookie is never young enough to be refused. No code
-changed; the existing `maxLifetimeDeadline` math already had this
-property, and the rule is now documented there.
+means clock skew, not forgery. Verify accepts it and computes the
+max-lifetime deadline from the stored issue time as usual, so a skewed
+session outlives its nominal max lifetime by the skew. Instances run
+NTP: that is seconds against a max lifetime of a year. No code changed;
+`maxLifetimeDeadline` already had this property, now documented there.
 
-The cost is that a session minted by a fast instance outlives its
-nominal max lifetime by the skew. That is the right trade: instances
-are expected to run NTP, so the skew is seconds against a max lifetime
-of a year, and the failure mode of the alternatives is a user locked
-out of an ops problem they cannot see or fix.
-
-Two alternatives lost. Bounded leeway — tolerate `n` seconds of skew,
-reject beyond it — buys nothing over unbounded tolerance, because the
-attacker it would defend against must already forge the HMAC, while it
-adds a knob and a cliff where an NTP outage logs everyone out at once.
-Rejecting any future `IssuedAt` is worse still: a single instance
-drifting a second forward would spray `errMaxLifetimeReached` at
-sessions it just minted, and the resulting logout storm looks nothing
-like a clock problem in the logs. Revisit only if the issue time ever
-stops being HMAC-covered, which is what makes skew the sole possible
-cause.
+Bounded leeway buys nothing -- the attacker it guards against must
+already forge the HMAC -- and adds a cliff where an NTP outage logs
+everyone out at once. Rejecting a future `IssuedAt` outright is worse:
+an instance a second fast sprays `errMaxLifetimeReached` at sessions it
+just minted, and the logout storm looks nothing like a clock problem in
+the logs. Revisit only if the issue time stops being HMAC-covered.
 
 ## 2026-08-25 — Accept a one-time logout when the `__Host-` prefix lands
 
-Turning on the `__Host-` prefix renames the session cookie from
-`_oidcauth` to `__Host-_oidcauth` under secure cookies, so on upgrade
-every live session becomes invisible and every user logs in again
-once. The stale bare-named cookie is never cleared and lingers until
-its own `Expires`. Logins already in flight fail their callback with
-the 400 for a missing state cookie and must be retried. The break is
-documented in the README rather than smoothed over.
+The prefix renames the session cookie from `_oidcauth` to
+`__Host-_oidcauth` under secure cookies, so every live session goes
+invisible on upgrade and every user logs in once more. The stale
+bare-named cookie lingers until its own `Expires`; in-flight logins
+fail their callback with the 400 for a missing state cookie and must be
+retried. The README documents the break.
 
-Reading both names during a transition was rejected. Honoring a
+Reading both names during a transition was rejected: honoring a
 bare-named session cookie is exactly the subdomain-shadowing exposure
-the prefix exists to close: a sibling host could keep setting one for
-as long as the dual read lasted, which is the whole window in which
-the protection is supposed to take effect. Clearing the old cookie
-instead of reading it was rejected too — it is a second `Set-Cookie`
-on every response for a break that costs each user one login, and the
-old cookie expires on its own regardless.
-
+the prefix closes, and the dual-read window is precisely when the
+protection should take effect. Clearing the old cookie was rejected too
+-- a second `Set-Cookie` on every response to save each user one login,
+when the cookie expires on its own anyway.

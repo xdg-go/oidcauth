@@ -120,11 +120,6 @@ func (a *Auth) verify(purpose, value string) ([]byte, error) {
 	if err != nil {
 		return nil, errMalformedPayload
 	}
-	// Try every key in the ring, current first, and never break early:
-	// a loop that stopped on the matching key would leak through
-	// timing which key verified, i.e. roughly how old the cookie is.
-	// matched is an OR of per-key constant-time compares, so it stays
-	// 0 for an empty ring -- an empty ring accepts nothing.
 	matched := 0
 	for _, key := range a.verifyKeys {
 		mac := hmac.New(sha256.New, key)
@@ -142,9 +137,7 @@ func (a *Auth) verify(purpose, value string) ([]byte, error) {
 }
 
 // hostCookiePrefix marks a cookie the browser stores only when it is
-// Secure, host-only (no Domain), and Path=/ (rfc6265bis 5.7). These
-// cookies are already written that way, so the prefix costs nothing
-// and stops a sibling subdomain from shadowing them.
+// Secure, host-only (no Domain), and Path=/ (rfc6265bis 5.7).
 const hostCookiePrefix = "__Host-"
 
 // secureCookiePrefix is the weaker sibling of hostCookiePrefix
