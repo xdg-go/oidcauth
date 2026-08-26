@@ -326,8 +326,7 @@ func renewalFixture(t *testing.T) (*Auth, *http.Cookie, func(time.Duration)) {
 }
 
 // decodeSession verifies and decodes a session cookie the middleware
-// wrote, so assertions read the real signed payload rather than the
-// Expires attribute alone.
+// wrote, so assertions read the real signed payload.
 func decodeSession(t *testing.T, a *Auth, c *http.Cookie) sessionPayload {
 	t.Helper()
 	payload, err := a.verify(purposeSession, c.Value)
@@ -423,9 +422,6 @@ func TestRenewalInRenewWindowPreservesIssuedAt(t *testing.T) {
 	if !got.Expiry.After(before.Expiry) {
 		t.Errorf("renewed Expiry %v did not extend %v", got.Expiry, before.Expiry)
 	}
-	if !renewed.Expires.Equal(wantExp) {
-		t.Errorf("cookie Expires = %v, want %v", renewed.Expires, wantExp)
-	}
 	if got.User.Sub != "s1" {
 		t.Errorf("renewed user = %+v, want sub s1", got.User)
 	}
@@ -515,9 +511,6 @@ func TestRenewedExpiryClampedToMaxLifetime(t *testing.T) {
 	wantExp := time.Unix(before.IssuedAt, 0).Add(a.maxSessionLifetime)
 	if !got.Expiry.Equal(wantExp) {
 		t.Errorf("clamped Expiry = %v, want %v", got.Expiry, wantExp)
-	}
-	if !renewed.Expires.Equal(wantExp) {
-		t.Errorf("cookie Expires = %v, want %v", renewed.Expires, wantExp)
 	}
 }
 
@@ -831,7 +824,7 @@ func TestConcurrentRequestsSameCookie(t *testing.T) {
 	a, c, advance := renewalFixture(t)
 	before := decodeSession(t, a, c)
 	advance(31 * time.Minute) // renew window opens at +30m: renewal is due
-	wantExpiry := a.now().Add(a.sessionLifetime).Truncate(time.Second)
+	wantExpiry := a.now().Add(a.sessionLifetime)
 
 	mounts := []struct {
 		name      string

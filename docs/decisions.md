@@ -396,7 +396,7 @@ the logs. Revisit only if the issue time stops being HMAC-covered.
 The prefix renames the session cookie from `_oidcauth` to
 `__Host-_oidcauth` under secure cookies, so every live session goes
 invisible on upgrade and every user logs in once more. The stale
-bare-named cookie lingers until its own `Expires`; in-flight logins
+bare-named cookie lingers until its own `Max-Age` runs out; in-flight logins
 fail their callback with the 400 for a missing state cookie and must be
 retried. The README documents the break.
 
@@ -406,3 +406,40 @@ the prefix closes, and the dual-read window is precisely when the
 protection should take effect. Clearing the old cookie was rejected too
 -- a second `Set-Cookie` on every response to save each user one login,
 when the cookie expires on its own anyway.
+
+## 2026-08-26 — Send Max-Age only; drop the Expires attribute from every cookie
+
+Every cookie this package writes now carries `Max-Age` and no `Expires`.
+Sending both had been belt-and-suspenders for clients that ignore
+`Max-Age`, a set that in practice is IE 8 and older; every current
+browser, Go's `net/http/cookiejar`, Python's `http.cookiejar`, and curl
+honor `Max-Age` and prefer it when both are present. The fallback
+protected nobody, but it created an invariant -- `Max-Age` and `Expires`
+must agree -- that drove real complexity: `writeSessionCookie` took a
+`now` parameter that had to be the exact clock reading `exp` was derived
+from, the one-second floor on `Max-Age` carried a "would lose clock-skew
+immunity" rationale, a shared `expiredCookieTime` sentinel existed for
+deletions, and `TestCookieMaxAge` cross-checked the two attributes.
+
+With `Expires` gone, `writeSessionCookie` reads `a.now()` itself; the
+server enforces the signed payload's `Expiry` on every request, so
+`Max-Age` is advisory and need not match it exactly. It is deliberately
+padded by `maxAgeSlack` (10s) rather than rounded: a browser counts
+`Max-Age` from the moment it parses the cookie, so exact agreement is
+impossible anyway, and a cookie held slightly too long is rejected
+harmlessly while one dropped slightly too early forces a needless login.
+A named pad also reads as policy where rounding up would read as
+arithmetic to puzzle over. The pad keeps `Max-Age` >= 1 for free, which
+matters because `net/http` omits a zero `Max-Age` and the browser would
+then keep the cookie until it closes. `TestCookieMaxAge` checks only a
+lower bound. Revisit only if a client that ignores `Max-Age` becomes an
+audience.
+
+The same change retired the whole-second truncation of the session
+payload's `Expiry`. It existed so a sub-second `Expiry` could never sit
+a fraction past the max-lifetime deadline while renewal's "already at
+the max" guard skipped the clamping rewrite, leaving the `Expires`
+attribute a fraction past what the server would honor. With no
+`Expires` attribute the only residue is that for that fraction of a
+second the payload is rejected as `errMaxLifetimeReached` rather than
+`errExpired`, which no one can observe.

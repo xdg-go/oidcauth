@@ -618,41 +618,40 @@ func TestHostPrefixedSessionIgnoresBareName(t *testing.T) {
 	}
 }
 
-// TestCookieMaxAge pins Max-Age on every cookie this package writes:
-// it must agree with Expires, and deletions must carry MaxAge < 0
-// (net/http encodes that as "Max-Age=0") alongside a past Expires.
+// TestCookieMaxAge checks Max-Age on every cookie this package writes.
+// Max-Age is the only lifetime attribute sent, so a live cookie must
+// carry one at least as long as its payload's lifetime, and a deletion
+// must carry MaxAge < 0 (net/http encodes that as "Max-Age=0").
 func TestCookieMaxAge(t *testing.T) {
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	a := cookieAuth(testCookieKey)
 	a.now = func() time.Time { return now }
 
-	// A renewal clamped to the max lifetime is the only write where
-	// Max-Age and Expires can disagree: exp is pinned to the
+	// A renewal clamped to the max lifetime pins exp to the
 	// whole-second deadline while now carries a fraction. Put the
-	// deadline 300ms out, close enough that rounding would have
-	// produced Max-Age=0 and dropped the attribute.
+	// deadline 300ms out, so that without slack Max-Age would truncate
+	// to zero and net/http would omit the attribute.
 	clampNow := now.Add(-300 * time.Millisecond)
 	clampIssuedAt := now.Add(-a.maxSessionLifetime).Unix()
 
 	writes := map[string]struct {
-		write       func(w http.ResponseWriter)
-		name        string
-		wantMaxAge  int
-		wantExpires time.Time // zero means now.Add(wantMaxAge seconds)
+		write   func(w http.ResponseWriter)
+		name    string
+		minSecs int // payload lifetime; -1 for a deletion
 	}{
-		"session set":   {func(w http.ResponseWriter) { a.setSessionCookie(w, User{Sub: "s1"}) }, a.sessionName(), int(a.sessionLifetime / time.Second), time.Time{}},
-		"session clear": {a.clearSessionCookie, a.sessionName(), -1, time.Time{}},
+		"session set":   {func(w http.ResponseWriter) { a.setSessionCookie(w, User{Sub: "s1"}) }, a.sessionName(), int(a.sessionLifetime / time.Second)},
+		"session clear": {a.clearSessionCookie, a.sessionName(), -1},
 		"state set": {func(w http.ResponseWriter) {
 			a.setStateCookie(w, statePayload{State: "s", Nonce: "n"})
-		}, a.stateCookieName(), int(stateTTL / time.Second), time.Time{}},
-		"state clear": {a.clearStateCookie, a.stateCookieName(), -1, time.Time{}},
+		}, a.stateCookieName(), int(stateTTL / time.Second)},
+		"state clear": {a.clearStateCookie, a.stateCookieName(), -1},
 		"renewal": {func(w http.ResponseWriter) {
 			a.renewSessionCookie(w, sessionPayload{
 				User:     User{Sub: "s1"},
 				Expiry:   now.Add(time.Minute),
 				IssuedAt: now.Add(-time.Hour).Unix(),
 			}, now)
-		}, a.sessionName(), int(a.sessionLifetime / time.Second), time.Time{}},
+		}, a.sessionName(), int(a.sessionLifetime / time.Second)},
 		"renewal clamped to max lifetime": {func(w http.ResponseWriter) {
 			a.renewSessionCookie(w, sessionPayload{
 				User: User{Sub: "s1"},
@@ -661,28 +660,21 @@ func TestCookieMaxAge(t *testing.T) {
 				Expiry:   clampNow.Add(200 * time.Millisecond),
 				IssuedAt: clampIssuedAt,
 			}, clampNow)
-		}, a.sessionName(), 1, now},
+		}, a.sessionName(), 1},
 	}
 	for name, tc := range writes {
 		t.Run(name, func(t *testing.T) {
 			rr := httptest.NewRecorder()
 			tc.write(rr)
 			c := recordedCookie(t, rr, tc.name)
-			if c.MaxAge != tc.wantMaxAge {
-				t.Errorf("MaxAge = %d, want %d", c.MaxAge, tc.wantMaxAge)
-			}
-			// Expires must say the same thing as Max-Age, so a client
-			// honoring either one behaves identically.
-			wantExpires := tc.wantExpires
 			switch {
-			case !wantExpires.IsZero():
-			case tc.wantMaxAge < 0:
-				wantExpires = expiredCookieTime
-			default:
-				wantExpires = now.Add(time.Duration(tc.wantMaxAge) * time.Second)
+			case tc.minSecs < 0 && c.MaxAge != -1:
+				t.Errorf("MaxAge = %d, want -1", c.MaxAge)
+			case tc.minSecs >= 0 && c.MaxAge < tc.minSecs:
+				t.Errorf("MaxAge = %d, want >= %d", c.MaxAge, tc.minSecs)
 			}
-			if !c.Expires.Equal(wantExpires) {
-				t.Errorf("Expires = %v, want %v", c.Expires, wantExpires)
+			if !c.Expires.IsZero() {
+				t.Errorf("Expires = %v, want none", c.Expires)
 			}
 		})
 	}

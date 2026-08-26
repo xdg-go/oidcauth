@@ -29,11 +29,14 @@ const (
 	// login handler and returning to the callback. Generous enough for
 	// a first-time consent screen, short enough to limit replay.
 	stateTTL = 15 * time.Minute
-)
 
-// expiredCookieTime is the Expires attribute of a deleted cookie: the
-// past, so a client that ignores Max-Age still drops it.
-var expiredCookieTime = time.Unix(0, 0).UTC()
+	// maxAgeSlack pads every Max-Age past the signed payload's expiry.
+	// The server rejects an expired payload regardless, so a cookie the
+	// browser holds a little too long costs nothing, while one it drops
+	// a little too early (Max-Age truncation, transit delay, clock
+	// drift) forces a needless login.
+	maxAgeSlack = 10 * time.Second
+)
 
 // errBadCookie reports that a signed cookie was absent, malformed,
 // tampered with, or expired. Every rejection reason below wraps it, so
@@ -159,43 +162,25 @@ func (a *Auth) stateCookieName() string { return a.sessionName() + "_state" }
 
 func (a *Auth) setSessionCookie(w http.ResponseWriter, u User) {
 	now := a.now()
-	a.writeSessionCookie(w, u, now.Unix(), now.Add(a.sessionLifetime), now)
+	a.writeSessionCookie(w, u, now.Unix(), now.Add(a.sessionLifetime))
 }
 
 // writeSessionCookie signs and writes one session cookie with the
 // given issue time and expiry. Renewal reuses it with the original
 // IssuedAt so the max lifetime keeps counting from first login.
 //
-// The expiry is truncated to whole seconds so it shares one time grid
-// with IssuedAt, which is Unix seconds. Without that, an expiry
-// carrying sub-second precision could sit a fraction past a max
-// lifetime deadline computed from IssuedAt, and renewal's "already at
-// the max" guard would skip the clamping rewrite, leaving a cookie
-// advertising an expiry the server would refuse to honor.
-//
-// now is the instant exp was computed from; Max-Age is its distance to
-// exp, so the caller must not re-read the clock for it.
-func (a *Auth) writeSessionCookie(w http.ResponseWriter, u User, issuedAt int64, exp, now time.Time) {
-	exp = exp.Truncate(time.Second)
-	// Truncate, not round: Max-Age must never outlast Expires. Floor at
-	// one second while the cookie is still live, because net/http omits
-	// Max-Age entirely when it is zero -- a renewal clamped to within a
-	// second of the max lifetime deadline would otherwise ship with
-	// Expires alone and lose the clock-skew immunity Max-Age buys.
-	maxAge := int(exp.Sub(now).Truncate(time.Second) / time.Second)
-	if maxAge < 1 && exp.After(now) {
-		maxAge = 1
-	}
+// The cookie carries Max-Age alone, no Expires; every client that
+// matters honors Max-Age, and a relative lifetime is immune to a
+// skewed client clock.
+func (a *Auth) writeSessionCookie(w http.ResponseWriter, u User, issuedAt int64, exp time.Time) {
+	maxAge := int((exp.Sub(a.now()) + maxAgeSlack) / time.Second)
 	markSessionResponse(w)
 	payload, _ := json.Marshal(sessionPayload{User: u, Expiry: exp, IssuedAt: issuedAt})
 	a.dropPendingSessionCookie(w)
 	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for http://localhost dev)
-		Name:    a.sessionName(),
-		Value:   a.sign(purposeSession, payload),
-		Path:    "/",
-		Expires: exp,
-		// Max-Age is relative, so a skewed client clock cannot make the
-		// cookie expire early or late.
+		Name:     a.sessionName(),
+		Value:    a.sign(purposeSession, payload),
+		Path:     "/",
 		MaxAge:   maxAge,
 		HttpOnly: true,
 		Secure:   a.secureCookies,
@@ -249,7 +234,6 @@ func (a *Auth) clearSessionCookie(w http.ResponseWriter) {
 		Name:     a.sessionName(),
 		Value:    "",
 		Path:     "/",
-		Expires:  expiredCookieTime,
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   a.secureCookies,
@@ -336,7 +320,7 @@ func (a *Auth) renewSessionCookie(w http.ResponseWriter, s sessionPayload, now t
 	if !exp.After(s.Expiry) {
 		return
 	}
-	a.writeSessionCookie(w, s.User, s.IssuedAt, exp, now)
+	a.writeSessionCookie(w, s.User, s.IssuedAt, exp)
 }
 
 func (a *Auth) setStateCookie(w http.ResponseWriter, s statePayload) {
@@ -347,8 +331,7 @@ func (a *Auth) setStateCookie(w http.ResponseWriter, s statePayload) {
 		Name:     a.stateCookieName(),
 		Value:    a.sign(purposeState, payload),
 		Path:     "/",
-		Expires:  s.Expiry,
-		MaxAge:   int(stateTTL / time.Second),
+		MaxAge:   int((stateTTL + maxAgeSlack) / time.Second),
 		HttpOnly: true,
 		Secure:   a.secureCookies,
 		SameSite: http.SameSiteLaxMode,
@@ -361,7 +344,6 @@ func (a *Auth) clearStateCookie(w http.ResponseWriter) {
 		Name:     a.stateCookieName(),
 		Value:    "",
 		Path:     "/",
-		Expires:  expiredCookieTime,
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   a.secureCookies,
