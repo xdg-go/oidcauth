@@ -54,21 +54,6 @@ func main() {
 An `http://` redirect URL (local dev) turns off the cookie `Secure`
 flag. Use `oidcauth.New(cfg, opts...)` to configure from code.
 
-Cookies are named `_oidcauth` and `_oidcauth_state`
-(`oidcauth.WithCookieName` renames both). With `Secure` on they go on
-the wire as `__Host-_oidcauth` and `__Host-_oidcauth_state`; the
-`__Host-` prefix stops a sibling subdomain from shadowing them, and
-plain-http dev, where browsers would not honor it, uses the bare
-names.
-
-Upgrading to a version that adds the `__Host-` prefix logs every user
-out once: the renamed cookie makes existing sessions invisible, and
-the old bare-named cookie is ignored until it expires on its own. A
-login that is mid-redirect when the new build starts fails its
-callback and must be retried. This is a one-time break; reading both
-names would undo the shadowing protection the prefix exists to
-provide.
-
 ## Guide
 
 ### Protect routes
@@ -121,30 +106,6 @@ identity provider, so the max lifetime bounds how long a disabled
 user can stay logged in. See
 [Session lifetime](https://pkg.go.dev/github.com/xdg-go/oidcauth#hdr-Session_lifetime).
 
-### Rotating the cookie secret
-
-Move the current secret into `PreviousCookieSecrets` (or
-`AUTH_COOKIE_SECRET_PREVIOUS`), set a fresh `CookieSecret`, and deploy.
-The new key signs every cookie; the old one still verifies, so nobody is
-logged out and no login in mid-redirect breaks.
-
-Retire the old key one full session lifetime after the last instance
-still carrying it as the *signing* key is gone -- a staggered rollout or
-a rollback keeps minting old-key cookies, so the clock starts at the end
-of the rollout, not the start of the deploy. One lifetime is enough
-because a cookie signed at or before that moment carries an expiry no
-later than its signing time plus the session lifetime, so every cookie
-the old key can still verify has expired by then.
-
-Rotation is not revocation. Cookies signed by the old key stay valid for
-as long as it stays in the ring. Dropping it immediately instead of a
-lifetime later is the logout-everyone kill switch, and is the only
-in-band one until per-session issue time is exposed to applications.
-
-The ring is uncapped, and an unauthenticated request carrying a garbage
-cookie costs one HMAC per key, so a long ring is a work multiplier an
-attacker can lean on. How long a ring to carry is your call.
-
 ### Ask for consent once per new user
 
 ```go
@@ -165,6 +126,19 @@ session gets `private`; anonymous responses are left alone, so public
 pages stay cacheable. One rule: if your handler sets `Cache-Control`
 itself on a route that can carry a session, set `private, no-store`.
 See [Caching](https://pkg.go.dev/github.com/xdg-go/oidcauth#hdr-Caching).
+
+### Cookies
+
+Cookies are named `_oidcauth` and `_oidcauth_state` (`oidcauth.WithCookieName`
+renames both). With `Secure` on they go on the wire as `__Host-_oidcauth` and
+`__Host-_oidcauth_state`; the `__Host-` prefix stops a sibling subdomain from
+shadowing them. For plain-http dev, where browsers would not honor it,
+oidcauth uses the bare names.
+
+To rotate cookie secrets, move the current secret into `PreviousCookieSecrets`
+(or `AUTH_COOKIE_SECRET_PREVIOUS`), set a fresh `CookieSecret`, and deploy.
+The new key signs every cookie; the old one still verifies, so nobody is
+logged out.
 
 ## Status
 
