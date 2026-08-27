@@ -53,6 +53,7 @@ var (
 	errExpired            = fmt.Errorf("%w: expired", errBadCookie)
 	errNoIssuedAt         = fmt.Errorf("%w: no issue time", errBadCookie)
 	errMaxLifetimeReached = fmt.Errorf("%w: max lifetime reached", errBadCookie)
+	errValidatorRejected  = fmt.Errorf("%w: rejected by session validator", errBadCookie)
 
 	// errCorruptPayload is the highest-signal reason: the payload
 	// carried a valid MAC yet did not decode. Nothing an outsider can
@@ -279,6 +280,15 @@ func (a *Auth) sessionFromRequestAt(r *http.Request, now time.Time) (sessionPayl
 	// max.
 	if !now.Before(a.maxLifetimeDeadline(s)) {
 		return sessionPayload{}, a.rejectCookie(purposeSession, errMaxLifetimeReached)
+	}
+	// The app's own check runs last, on a session this package has
+	// already found intact and unexpired, so a validator never sees a
+	// user or issue time it cannot trust. Rejecting here rather than
+	// in the middleware means the request is indistinguishable from
+	// one carrying an expired cookie: same response, and no renewal,
+	// because renewal only ever runs on a session that verified.
+	if a.sessionValidator != nil && !a.sessionValidator(s.User, time.Unix(s.IssuedAt, 0).UTC()) {
+		return sessionPayload{}, a.rejectCookie(purposeSession, errValidatorRejected)
 	}
 	return s, nil
 }

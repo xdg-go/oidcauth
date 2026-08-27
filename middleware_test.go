@@ -972,3 +972,234 @@ func TestNoRenewalWithoutValidSession(t *testing.T) {
 		t.Fatalf("control: %d session Set-Cookie, want 1", len(set))
 	}
 }
+
+// validatorFixture is renewalFixture plus an app-supplied session
+// validator, recording every call so a test can assert the validator
+// never saw a request the library should have rejected on its own.
+func validatorFixture(t *testing.T, fn func(u User, issuedAt time.Time) bool) (a *Auth, c *http.Cookie, advance func(time.Duration), calls *int) {
+	t.Helper()
+	a, c, advance = renewalFixture(t)
+	calls = new(int)
+	wrapped := func(u User, issuedAt time.Time) bool {
+		*calls++
+		return fn(u, issuedAt)
+	}
+	if err := WithSessionValidator(wrapped)(a); err != nil {
+		t.Fatalf("WithSessionValidator: %v", err)
+	}
+	return a, c, advance, calls
+}
+
+// serveRequireAuth runs RequireAuth with cookie c, or with no cookie
+// at all when c is nil.
+func serveRequireAuth(a *Auth, c *http.Cookie) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/private", nil)
+	if c != nil {
+		req.AddCookie(c)
+	}
+	rr := httptest.NewRecorder()
+	a.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})).ServeHTTP(rr, req)
+	return rr
+}
+
+// TestSessionValidatorRejectsOldIssueTime is the revocation case the
+// hook exists for: the app keeps a per-user epoch and refuses any
+// session issued strictly before it. The rejection must be
+// indistinguishable from an expired cookie, so the response is
+// compared byte for byte against the same request made past the
+// session lifetime.
+func TestSessionValidatorRejectsOldIssueTime(t *testing.T) {
+	var gotSub string
+	a, c, advance, calls := validatorFixture(t, func(u User, issuedAt time.Time) bool {
+		gotSub = u.Sub
+		// Epoch one minute after the cookie was minted.
+		epoch := time.Date(2026, 8, 21, 0, 1, 0, 0, time.UTC)
+		return !issuedAt.Before(epoch)
+	})
+	advance(5 * time.Minute)
+	got := serveRequireAuth(a, c)
+	if *calls != 1 {
+		t.Errorf("validator calls = %d, want 1", *calls)
+	}
+	// The validator judges a real identity, not a zero value.
+	if gotSub != "s1" {
+		t.Errorf("validator saw Sub = %q, want %q", gotSub, "s1")
+	}
+
+	// Same request, same cookie, but past the session lifetime: the
+	// rejection the client is allowed to distinguish from nothing.
+	b, bc, badvance := renewalFixture(t)
+	badvance(b.sessionLifetime + time.Minute)
+	want := serveRequireAuth(b, bc)
+
+	if got.Code != want.Code {
+		t.Errorf("status = %d, want %d (expired-session status)", got.Code, want.Code)
+	}
+	if !reflect.DeepEqual(got.Result().Header, want.Result().Header) {
+		t.Errorf("headers = %v, want %v (expired-session headers)", got.Result().Header, want.Result().Header)
+	}
+	if got.Body.String() != want.Body.String() {
+		t.Errorf("body = %q, want %q (expired-session body)", got.Body, want.Body)
+	}
+}
+
+// TestSessionValidatorSuppressesRenewal covers the other half of
+// "rejected exactly as expired": a session the validator refuses must
+// not be handed a fresh cookie, even though its clock puts it well
+// inside the renew window.
+func TestSessionValidatorSuppressesRenewal(t *testing.T) {
+	a, c, advance, calls := validatorFixture(t, func(User, time.Time) bool { return false })
+	advance(31 * time.Minute) // renew window opens at +30m
+
+	rr, ok := serveAuthenticated(a, c, nil)
+	if *ok {
+		t.Error("rejected session seen as logged in")
+	}
+	if *calls != 1 {
+		t.Errorf("validator calls = %d, want 1", *calls)
+	}
+	if got := sessionSetCookies(rr, a.sessionName()); len(got) != 0 {
+		t.Errorf("renewed a session the validator rejected: %q", got)
+	}
+}
+
+// TestSessionValidatorAcceptsAndRenews pins the ordinary production
+// case: a configured validator that accepts leaves renewal alone, so
+// an accepting hook costs a session nothing.
+func TestSessionValidatorAcceptsAndRenews(t *testing.T) {
+	a, c, advance, calls := validatorFixture(t, func(User, time.Time) bool { return true })
+	advance(31 * time.Minute) // renew window opens at +30m
+
+	rr, ok := serveAuthenticated(a, c, nil)
+	if !*ok {
+		t.Error("accepted session seen as logged out")
+	}
+	if *calls != 1 {
+		t.Errorf("validator calls = %d, want 1", *calls)
+	}
+	if sessionCookieOrNil(rr, a.sessionName()) == nil {
+		t.Error("no renewal with an accepting validator set")
+	}
+}
+
+// TestSessionValidatorNotCalledOnUnverifiedCookie pins the contract
+// that the validator only ever sees a User and issue time this package
+// has already authenticated.
+func TestSessionValidatorNotCalledOnUnverifiedCookie(t *testing.T) {
+	valid := func(t *testing.T) (*Auth, *http.Cookie, *int) {
+		t.Helper()
+		a, c, _, calls := validatorFixture(t, func(User, time.Time) bool { return true })
+		return a, c, calls
+	}
+
+	t.Run("no cookie", func(t *testing.T) {
+		a, _, calls := valid(t)
+		serveRequireAuth(a, nil)
+		if *calls != 0 {
+			t.Errorf("validator calls = %d, want 0", *calls)
+		}
+	})
+
+	// A well-formed cookie signed by a key this Auth does not know:
+	// it fails only at the signature comparison, so reaching the
+	// validator would mean the hook runs ahead of the MAC check.
+	t.Run("bad signature", func(t *testing.T) {
+		a, _, calls := valid(t)
+		foreign := cookieAuth(testForeignKey)
+		foreign.now = a.now
+		rr := httptest.NewRecorder()
+		foreign.setSessionCookie(rr, User{Sub: "s1"})
+		serveRequireAuth(a, recordedCookie(t, rr, foreign.sessionName()))
+		if *calls != 0 {
+			t.Errorf("validator calls = %d, want 0", *calls)
+		}
+	})
+}
+
+// TestNoSessionValidatorUnchanged pins the default: with no validator
+// configured, a session inside the renew window is accepted and
+// renewed exactly as before the hook existed.
+func TestNoSessionValidatorUnchanged(t *testing.T) {
+	a, c, advance := renewalFixture(t)
+	if a.sessionValidator != nil {
+		t.Fatal("sessionValidator set by default")
+	}
+	advance(31 * time.Minute)
+
+	rr, ok := serveAuthenticated(a, c, nil)
+	if !*ok {
+		t.Error("valid session rejected with no validator set")
+	}
+	if sessionCookieOrNil(rr, a.sessionName()) == nil {
+		t.Error("no renewal with no validator set")
+	}
+}
+
+// TestSessionValidatorEpochBoundary pins the comparison the doc
+// comment on WithSessionValidator prescribes. An epoch equal to a live
+// session's IssuedAt leaves it alone -- which is why "log out
+// everywhere" must set the epoch to now, not to the current cookie's
+// issue time, since a stolen clone carries that same timestamp.
+func TestSessionValidatorEpochBoundary(t *testing.T) {
+	cases := []struct {
+		name       string
+		epochAfter time.Duration // epoch relative to the session's IssuedAt
+		wantValid  bool
+	}{
+		{"epoch equals IssuedAt", 0, true},
+		{"epoch is now", 5 * time.Minute, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var epoch time.Time
+			a, c, advance, calls := validatorFixture(t, func(_ User, issuedAt time.Time) bool {
+				return !issuedAt.Before(epoch)
+			})
+			mintedAt := a.now()
+			epoch = mintedAt.Add(tc.epochAfter)
+			advance(5 * time.Minute) // the session is live either way
+
+			_, ok := serveAuthenticated(a, c, nil)
+			if *ok != tc.wantValid {
+				t.Errorf("session valid = %v, want %v", *ok, tc.wantValid)
+			}
+			if *calls != 1 {
+				t.Errorf("validator calls = %d, want 1", *calls)
+			}
+		})
+	}
+}
+
+// TestSessionValidatorSubSecondEpoch pins the truncation the
+// WithSessionValidator doc prescribes: an epoch set partway through a
+// second must not revoke a session minted later in that same second,
+// whose issuedAt truncates back to the top of it.
+func TestSessionValidatorSubSecondEpoch(t *testing.T) {
+	a := authWithLoginPath()
+	base := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
+	epoch := base.Add(200 * time.Millisecond) // "log out everywhere" fires
+	now := base.Add(900 * time.Millisecond)   // user logs back in
+	a.now = func() time.Time { return now }
+
+	calls := 0
+	err := WithSessionValidator(func(_ User, issuedAt time.Time) bool {
+		calls++
+		return !issuedAt.Before(epoch.Truncate(time.Second))
+	})(a)
+	if err != nil {
+		t.Fatalf("WithSessionValidator: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	a.setSessionCookie(rr, User{Sub: "s1"})
+	c := recordedCookie(t, rr, a.sessionName())
+
+	if _, ok := serveAuthenticated(a, c, nil); !*ok {
+		t.Error("session minted after the epoch was revoked by it")
+	}
+	if calls != 1 {
+		t.Errorf("validator calls = %d, want 1", calls)
+	}
+}

@@ -240,6 +240,8 @@ type Auth struct {
 	forceConsentParams map[string]string
 	extraClaims        []string
 
+	sessionValidator func(u User, issuedAt time.Time) bool
+
 	logger *slog.Logger
 
 	now func() time.Time // test hook
@@ -331,6 +333,61 @@ func WithSessionMaxLifetime(d time.Duration) Option {
 			return err
 		}
 		a.maxSessionLifetime = d
+		return nil
+	}
+}
+
+// WithSessionValidator sets an app-supplied check that runs on every
+// session verification, after the cookie's signature, issue time,
+// expiry, and max lifetime have all passed. Returning false rejects
+// the session exactly as an expired cookie is rejected: the same
+// response, and no renewed cookie. The client is told nothing about
+// why, so the validator is free to consult app state.
+//
+// The validator is not consulted at login: a successful callback mints
+// a session cookie without asking. A rule that rejects on identity
+// alone -- this account is disabled, this password changed -- therefore
+// loops: the rejected request redirects to the provider, the provider's
+// own session is still live and bounces straight back, the callback
+// mints a fresh cookie, and the validator rejects it again, until the
+// browser gives up. Judge a session by its issue time instead, as the
+// revocation epoch below does; a freshly minted issuedAt is at or after
+// the epoch, so logging in ends the cycle.
+//
+// It runs on the request path of every authenticated request, so it
+// must be fast, concurrency-safe, and must not block on a slow
+// dependency. It is not called at all when the cookie is absent,
+// malformed, or fails signature verification. A panic is not caught
+// here: it propagates to net/http's per-connection recovery, which
+// closes the request with a 500 and no cookie written.
+//
+// The User passed in is read-only. Its Extra map is the same map the
+// handler later reads from the request context, shared rather than
+// copied, so writing to it corrupts what the handler sees and races
+// other requests. Do not mutate or retain it.
+//
+// issuedAt is in UTC and has whole-second resolution: it is the mint
+// time truncated to a Unix second. An application comparing against a
+// full-precision timestamp must truncate it the same way --
+// epoch.Truncate(time.Second) -- or a session minted later in the
+// same second as the epoch will appear to precede it and be rejected
+// for no reason. The cost of truncating is that sessions minted
+// earlier in the epoch's own second survive it; the epoch takes full
+// effect from the next second on.
+//
+// The canonical use is "log out everywhere": store a revocation epoch
+// per user and reject any session with issuedAt strictly before it.
+// Set that epoch to now, never to the current cookie's IssuedAt. A
+// stolen cookie is a clone of the user's own and carries the same
+// IssuedAt, so a strictly-before comparison against it would spare the
+// attacker along with the user. Setting the epoch to now revokes both
+// and forces the user to re-authenticate, which is the point.
+func WithSessionValidator(fn func(u User, issuedAt time.Time) bool) Option {
+	return func(a *Auth) error {
+		if fn == nil {
+			return errors.New("oidcauth: session validator must not be nil")
+		}
+		a.sessionValidator = fn
 		return nil
 	}
 }

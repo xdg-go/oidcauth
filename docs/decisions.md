@@ -443,3 +443,28 @@ attribute a fraction past what the server would honor. With no
 `Expires` attribute the only residue is that for that fraction of a
 second the payload is rejected as `errMaxLifetimeReached` rather than
 `errExpired`, which no one can observe.
+
+## 2026-08-26 — Expose session issue time through a validator hook, not context claims
+
+Applications that need to judge a session by more than its signature and
+expiry get `WithSessionValidator(func(User, issuedAt time.Time) bool)`.
+The library calls it during session verification, so returning false
+rejects the request before the handler runs and suppresses cookie
+renewal in the same step. A rejected session produces exactly the
+response an expired one does, so nothing on the wire says whether the
+signature, the deadline, or the application's own rule turned the
+request away. The motivating case is the downstream skeleton app's
+per-user revocation epoch, which compares a session's issue time against
+a stored timestamp.
+
+The alternative was to add the issue time to the context claims the app
+already reads via `UserFromContext` and let the handler decide. It lost
+on three counts: the check becomes opt-in per handler, so one protected
+route that forgets it is a hole; the library would still renew the cookie
+of a session the application has just decided is revoked, extending the
+life of the thing being rejected; and every application would reimplement
+the same enforcement around the same value. Pushing the decision point
+into verification makes the library do the work once. Revisit if an
+application needs the issue time for something other than an accept or
+reject decision -- displaying it, say -- since the hook deliberately
+returns only a bool.

@@ -289,29 +289,29 @@ switch too expensive to rehearse.
 The skeleton's per-user revocation epoch needs to see `IssuedAt`.
 
 ### 4.1 Pick the exposure mechanism
-- [ ] Choose between adding issue time to the context claims the app
+- [x] Choose between adding issue time to the context claims the app
       already reads and a `WithSessionValidator(func(User, issuedAt)
       bool)` hook. Prefer the validator hook if it lets the library
       reject before the handler runs; prefer context claims if the app
       would otherwise duplicate lookups
-- [ ] Record the choice and the rejected alternative in the repo's
+- [x] Record the choice and the rejected alternative in the repo's
       decision log
 
 ### 4.2 Implement and test
-- [ ] Implement the chosen mechanism
-- [ ] Ensure a validator that returns false produces the same response
+- [x] Implement the chosen mechanism
+- [x] Ensure a validator that returns false produces the same response
       as an expired session (no leaking why)
-- [ ] Ensure a rejecting validator suppresses renewal
-- [ ] **Test**: app-side rejection based on an issue time older than a
+- [x] Ensure a rejecting validator suppresses renewal
+- [x] **Test**: app-side rejection based on an issue time older than a
       threshold
-- [ ] **Test**: validator not called when the cookie is absent or the
+- [x] **Test**: validator not called when the cookie is absent or the
       signature is bad
-- [ ] **Test**: default behavior unchanged when no validator is set
-- [ ] Doc comment: "log out everywhere" sets the epoch to `now`, never
+- [x] **Test**: default behavior unchanged when no validator is set
+- [x] Doc comment: "log out everywhere" sets the epoch to `now`, never
       to the current cookie's `IssuedAt`. A stolen cookie is a clone and
       shares that timestamp, so a strictly-before comparison spares the
       attacker along with the user; the user re-authenticates
-- [ ] **Test**: an epoch equal to a live session's `IssuedAt` does not
+- [x] **Test**: an epoch equal to a live session's `IssuedAt` does not
       revoke it, and an epoch of `now` does
 
 ---

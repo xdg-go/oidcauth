@@ -113,6 +113,7 @@ func TestOptionValidation(t *testing.T) {
 		"relative logout path":        WithLogoutPath("out"),
 		"relative post-logout":        WithPostLogoutRedirect("bye"),
 		"nil known func":              ForceApprovalIfNewUser(nil),
+		"nil session validator":       WithSessionValidator(nil),
 		"empty consent params":        WithForceConsentParams(nil),
 		"no extra claim names":        WithExtraClaims(),
 	}
