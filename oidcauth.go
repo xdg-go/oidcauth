@@ -161,7 +161,7 @@ func FromEnv() (Config, error) {
 		CookieSecret: os.Getenv("AUTH_COOKIE_SECRET"),
 	}
 	if prev := os.Getenv("AUTH_COOKIE_SECRET_PREVIOUS"); prev != "" {
-		for _, s := range strings.Split(prev, ",") {
+		for s := range strings.SplitSeq(prev, ",") {
 			cfg.PreviousCookieSecrets = append(cfg.PreviousCookieSecrets, strings.TrimSpace(s))
 		}
 	}

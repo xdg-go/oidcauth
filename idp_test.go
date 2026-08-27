@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -135,9 +136,7 @@ func (idp *fakeIDP) mintIDToken() string {
 		"email_verified": true,
 		"name":           "Test User",
 	}
-	for k, v := range idp.claims {
-		claims[k] = v
-	}
+	maps.Copy(claims, idp.claims)
 	header := map[string]any{"alg": "RS256", "kid": "test"}
 	signingInput := b64JSON(idp.t, header) + "." + b64JSON(idp.t, claims)
 	digest := sha256.Sum256([]byte(signingInput))

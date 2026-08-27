@@ -217,14 +217,12 @@ func (a *Auth) dropPendingSessionCookie(w http.ResponseWriter) {
 // semicolon-separated attribute. It returns "" if the value has no
 // name=value pair.
 func setCookieName(value string) string {
-	if i := strings.IndexByte(value, ';'); i >= 0 {
-		value = value[:i]
-	}
-	i := strings.IndexByte(value, '=')
-	if i < 0 {
+	value, _, _ = strings.Cut(value, ";")
+	before, _, ok := strings.Cut(value, "=")
+	if !ok {
 		return ""
 	}
-	return strings.TrimSpace(value[:i])
+	return strings.TrimSpace(before)
 }
 
 func (a *Auth) clearSessionCookie(w http.ResponseWriter) {
@@ -412,11 +410,9 @@ func markPrivateResponse(w http.ResponseWriter) {
 // carries the named directive. Directive names are case-insensitive
 // and comma-separated; a directive may carry an "=" argument.
 func hasCacheDirective(value, name string) bool {
-	for _, part := range strings.Split(value, ",") {
+	for part := range strings.SplitSeq(value, ",") {
 		part = strings.TrimSpace(part)
-		if i := strings.IndexByte(part, '='); i >= 0 {
-			part = part[:i]
-		}
+		part, _, _ = strings.Cut(part, "=")
 		if strings.EqualFold(part, name) {
 			return true
 		}

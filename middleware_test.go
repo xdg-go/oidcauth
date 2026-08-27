@@ -845,10 +845,8 @@ func TestConcurrentRequestsSameCookie(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	for _, m := range mounts {
-		for i := 0; i < perMount; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for range perMount {
+			wg.Go(func() {
 				<-start
 				seenUser := new(bool)
 				h := m.wrap(concurrentBodyHandler(t, seenUser))
@@ -888,7 +886,7 @@ func TestConcurrentRequestsSameCookie(t *testing.T) {
 				if got.User.Sub != "s1" {
 					t.Errorf("%s: renewed user = %+v, want sub s1", m.name, got.User)
 				}
-			}()
+			})
 		}
 	}
 	close(start)
