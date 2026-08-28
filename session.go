@@ -89,13 +89,17 @@ func (a *Auth) rejectCookie(purpose string, err error) error {
 // rejected cookie is routine traffic, while a validator that cannot
 // answer is an outage in a dependency the operator needs to see.
 //
-// A validator that honors ctx cancellation reports one every time a
-// client aborts mid-request, which is ordinary traffic rather than an
-// outage -- and an authenticated client could otherwise flood the warn
-// level on purpose. Those drop to debug. Only the level changes: the
-// caller still sees errValidatorFailed.
+// The level follows the request context's state, not the error's
+// identity. When ctx is already done the client has gone away, so a
+// validator honoring cancellation reports an error on every aborted
+// request: ordinary traffic that an authenticated client could
+// otherwise flood the warn level with on purpose. Those drop to debug.
+// An error that merely wraps context.Canceled or DeadlineExceeded
+// while the request is still live is a dependency timeout -- a real
+// outage -- and stays at warn. Only the level changes: the caller
+// still sees errValidatorFailed.
 func (a *Auth) validatorFailed(ctx context.Context, err error) error {
-	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if ctx.Err() != nil {
 		a.logger.Debug("oidcauth: session validator canceled", "reason", err.Error())
 	} else {
 		a.logger.Warn("oidcauth: session validator failed", "reason", err.Error())

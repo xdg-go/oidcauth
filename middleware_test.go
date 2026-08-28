@@ -1475,13 +1475,13 @@ func TestValidatorFailureLogsWarn(t *testing.T) {
 	wantValidatorLog(t, h, slog.LevelWarn)
 }
 
-// TestValidatorCanceledLogsDebug: the doc tells validators to honor
-// cancellation, so a correct one reports the context error on every
-// aborted or timed-out request. That is ordinary traffic, and a client
-// could amplify it on purpose, so it drops to debug -- with the same
-// 503. Both context errors are wrapped, to pin errors.Is rather than
-// equality.
-func TestValidatorCanceledLogsDebug(t *testing.T) {
+// TestValidatorContextErrorOnLiveRequestLogsWarn: a validator that
+// gives its datastore a shorter child timeout, or that wraps a store
+// error satisfying errors.Is(..., context.DeadlineExceeded), reports a
+// dependency outage. The request context is still live, so the level
+// follows it: warn, not debug. Both context errors are wrapped, to pin
+// that the error's identity no longer steers the level.
+func TestValidatorContextErrorOnLiveRequestLogsWarn(t *testing.T) {
 	for name, cause := range map[string]error{
 		"canceled":          context.Canceled,
 		"deadline exceeded": context.DeadlineExceeded,
@@ -1496,7 +1496,7 @@ func TestValidatorCanceledLogsDebug(t *testing.T) {
 			if got := serveRequireAuth(a, c); got.Code != http.StatusServiceUnavailable {
 				t.Fatalf("status = %d, want 503", got.Code)
 			}
-			wantValidatorLog(t, h, slog.LevelDebug)
+			wantValidatorLog(t, h, slog.LevelWarn)
 		})
 	}
 }

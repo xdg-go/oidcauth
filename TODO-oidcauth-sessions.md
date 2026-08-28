@@ -358,11 +358,14 @@ a breaking change.
       `UserFromContext` collapses anonymous, rejected, and failed into
       one `ok == false`, and an app rolling its own gate reintroduces
       the very redirect loop 4.3 exists to prevent
-- [x] Log a validator failure at debug, not warn, when the cause is the
-      client going away (`context.Canceled`, deadline exceeded). The doc
-      tells validators to honor cancellation, so a correct one reports
-      it on every aborted request; at warn that is normal traffic
-      drowning the signal, and a client can amplify it deliberately
+- [x] Log a validator failure at debug, not warn, when the client has
+      gone away -- that is, when the request context is already done.
+      The doc tells validators to honor cancellation, so a correct one
+      reports an error on every aborted request; at warn that is normal
+      traffic drowning the signal, and a client can amplify it
+      deliberately. The level follows the request context's state, not
+      the error's identity: an error wrapping `context.DeadlineExceeded`
+      on a still-live request is a dependency timeout and stays at warn
 - [x] Document that the validator error's text reaches the log, so
       callers should keep identifiers out of it
 - [x] Mark the 503 response private, so an error-caching intermediary
