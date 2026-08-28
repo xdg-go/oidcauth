@@ -446,6 +446,10 @@ second the payload is rejected as `errMaxLifetimeReached` rather than
 
 ## 2026-08-26 — Expose session issue time through a validator hook, not context claims
 
+**Partly superseded** -- the signature and the accept/reject-only outcome
+below are out of date; see "Let a session validator report failure, not
+just rejection".
+
 Applications that need to judge a session by more than its signature and
 expiry get `WithSessionValidator(func(User, issuedAt time.Time) bool)`.
 The library calls it during session verification, so returning false
@@ -468,3 +472,34 @@ into verification makes the library do the work once. Revisit if an
 application needs the issue time for something other than an accept or
 reject decision -- displaying it, say -- since the hook deliberately
 returns only a bool.
+
+## 2026-08-28 — Let a session validator report failure, not just rejection
+
+`WithSessionValidator` now takes `func(ctx context.Context, u User,
+issuedAt time.Time) (bool, error)` rather than the `func(User, issuedAt
+time.Time) bool` the entry above advertises. The bool-only hook forced a
+validator whose backing store was unreachable to guess: return true and
+honor sessions the app may have revoked, or return false and log every
+user out of a working site because one database was down. Neither guess
+belongs to the library, and neither is an authorization decision, so the
+hook now has three outcomes: `(true, nil)` accepts, `(false, nil)`
+rejects exactly as an expired cookie does, and a non-nil error says the
+validator could not answer. `ctx` is the request's context so a
+validator doing I/O can honor cancellation.
+
+The error outcome is deliberately not mapped onto rejection.
+`Auth.RequireAuth` answers 503, because a protected route that cannot
+check revocation is unavailable, not unauthorized. Bare
+`Auth.Authenticate` treats the request as anonymous, so a public page
+served through it does not go down with the revocation store. Nothing is
+renewed in either case. The error is logged at warn, except a canceled
+or timed-out request context, which is logged at debug because a client
+going away is ordinary traffic.
+
+No fail-open or fail-closed option accompanies this. An app that wants
+its outage to let requests through returns `(true, nil)` from its own
+error path; one that wants requests shut out returns the error and takes
+the 503. A library switch would only relocate a choice the validator is
+already holding, and would have to be documented against both outcomes
+above. Revisit only if a third disposition appears that the validator
+cannot express itself.
