@@ -88,23 +88,65 @@ call `auth.ClearSession(w)`.
 
 ### Tune session lifetime
 
+Two clocks run on every session; the first to expire ends it. The
+session lifetime slides with activity, the max lifetime does not.
+
 ```go
 auth, err := oidcauth.NewFromEnv(
-	oidcauth.WithSessionLifetime(30*24*time.Hour),   // slides with activity
-	oidcauth.WithSessionRenewWindow(15*24*time.Hour), // renew this close to expiry
-	oidcauth.WithSessionMaxLifetime(90*24*time.Hour), // hard cap from login
+	oidcauth.WithSessionLifetime(30*24*time.Hour),    // slides with activity (default 90d)
+	oidcauth.WithSessionRenewWindow(15*24*time.Hour), // renew this close to expiry (default 45d)
+	oidcauth.WithSessionMaxLifetime(90*24*time.Hour), // hard cap from login (default 365d)
 )
 ```
+
+`New` requires renew window <= lifetime <= max lifetime and fails
+rather than substituting defaults.
 
 Changing the session lifetime applies only to cookies minted or
 renewed afterward, because the expiry is baked in at write time.
 Changing the max lifetime applies retroactively: it is measured from
 the issue time stored in each cookie.
 
-Defaults are 90, 45, and 365 days. Renewal does not re-check the
-identity provider, so the max lifetime bounds how long a disabled
-user can stay logged in. See
+Renewal extends the cookie; it does not re-authenticate. Claims freeze
+at login, so a user disabled at the provider -- or a thief holding a
+stolen cookie -- stays valid until the max lifetime. To end a session
+sooner, see [Revoke a session](#revoke-a-session) below and
 [Session lifetime](https://pkg.go.dev/github.com/xdg-go/oidcauth#hdr-Session_lifetime).
+
+### Revoke a session
+
+`WithSessionValidator` runs your check on every verified session,
+after the signature, expiry, and max lifetime pass. Store a revocation
+epoch per user and reject sessions issued before it. The validator
+runs on every authenticated request, so keep it fast and
+concurrency-safe; cache the epoch rather than hitting the store each
+time:
+
+```go
+auth, err := oidcauth.NewFromEnv(
+	oidcauth.WithSessionValidator(
+		func(ctx context.Context, u oidcauth.User, issuedAt time.Time) (bool, error) {
+			epoch, err := store.RevokedAt(ctx, u.Issuer, u.Sub)
+			if err != nil {
+				// outage, not a verdict: 503 under RequireAuth,
+				// never a renewal; under Authenticate the request
+				// looks anonymous, so check
+				// SessionUnavailableFromContext before treating it
+				// as logged out
+				return false, err
+			}
+			return !issuedAt.Before(epoch.Truncate(time.Second)), nil
+		}),
+)
+```
+
+To log a user out everywhere, set their epoch to now, never to the
+current cookie's issue time. Truncate the epoch to a whole second, as
+the example does, because `issuedAt` is whole-second. Judge by issue
+time rather than by identity: the validator does not run at the
+callback, so a rule that rejects on identity alone loops between your
+app and the provider. For the reasoning behind all three, see
+[Revoking sessions](https://pkg.go.dev/github.com/xdg-go/oidcauth#hdr-Revoking_sessions).
 
 ### Ask for consent once per new user
 
@@ -125,6 +167,10 @@ Any response that writes a session cookie gets
 session gets `private`; anonymous responses are left alone, so public
 pages stay cacheable. One rule: if your handler sets `Cache-Control`
 itself on a route that can carry a session, set `private, no-store`.
+A page whose body differs by login state -- a public page rendering
+login/logout links, say -- must set `private, no-store` itself: the
+anonymous rendering carries only `Vary: Cookie`, which CDNs do not
+honor reliably.
 See [Caching](https://pkg.go.dev/github.com/xdg-go/oidcauth#hdr-Caching).
 
 ### Cookies

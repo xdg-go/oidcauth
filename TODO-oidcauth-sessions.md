@@ -391,22 +391,22 @@ a breaking change.
 ## Phase 5: Documentation and Release
 
 ### 5.1 Docs
-- [ ] Split the `WithSessionValidator` doc comment: it now runs ~70
+- [x] Split the `WithSessionValidator` doc comment: it now runs ~70
       lines over four jobs. Keep the three-outcome contract on the
       option; move the panic/recovery discussion and the
       epoch-comparison rationale to the package doc's session section
-- [ ] README: session lifetime model, the two clocks, the defaults, and
+- [x] README: session lifetime model, the two clocks, the defaults, and
       how an app implements revocation on top of `IssuedAt`
-- [ ] Doc comments on every new exported symbol
-- [ ] Note explicitly that renewal keeps a stolen cookie alive only
+- [x] Doc comments on every new exported symbol
+- [x] Note explicitly that renewal keeps a stolen cookie alive only
       until the max lifetime, and that revocation is the app's job
-- [ ] State that renewal is not re-authentication: claims freeze at
+- [x] State that renewal is not re-authentication: claims freeze at
       login, so a user disabled at the IdP can stay valid until the max
       lifetime
-- [ ] `AuthenticateNoRenew` doc comment warns that at least one renewing
+- [x] `AuthenticateNoRenew` doc comment warns that at least one renewing
       mount must sit in the user's regular path, or sessions expire a
       full lifetime after login regardless of activity
-- [ ] Warn that a page rendering differently by login state must not be
+- [x] Warn that a page rendering differently by login state must not be
       shared-cached, whichever middleware it is behind
 
 ### 5.2 Release

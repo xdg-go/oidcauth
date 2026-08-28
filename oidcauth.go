@@ -51,10 +51,41 @@
 //
 // Renewal extends the cookie's expiration; it does not re-authenticate.
 // Claims freeze at login, so a user disabled at the provider keeps a
-// valid session until the max lifetime.
+// valid session until the max lifetime. A stolen cookie renews on the
+// thief's requests just as it would on the user's, so the max lifetime
+// is the only bound this package puts on it. Ending a session sooner
+// is the app's job; see "Revoking sessions" below.
 //
 // [New] requires renew window <= lifetime <= max lifetime and fails
 // rather than substituting defaults.
+//
+// # Revoking sessions
+//
+// [WithSessionValidator] runs an app-supplied check on every verified
+// session. The canonical use is "log out everywhere": store a
+// revocation epoch per user and reject any session whose issue time is
+// strictly before it. Set that epoch to now, never to the current
+// cookie's issue time: a stolen cookie carries the same issue time as
+// the user's own (see "Session lifetime" above), so a strictly-before
+// comparison against it would spare the attacker along with the user.
+// Setting the epoch to now revokes both and forces the user to
+// re-authenticate, which is the point.
+//
+// The issue time passed to the validator is UTC with whole-second
+// resolution: the mint time truncated to a Unix second. An app
+// comparing it against a full-precision epoch must truncate the epoch
+// the same way -- epoch.Truncate(time.Second) -- or a session minted
+// later in the same second as the epoch appears to precede it and is
+// rejected for no reason. The cost of truncating is that sessions
+// minted earlier in the epoch's own second survive it; the epoch takes
+// full effect from the next second on.
+//
+// This package does not recover from a panicking validator. What the
+// client sees is whatever the app's own recovery middleware does; with
+// none, net/http's per-connection recovery logs the panic and closes
+// the connection without writing a status, HTTP/2 resets the stream,
+// and a directly invoked handler propagates the panic. Recover inside
+// the validator, or mount recovery middleware.
 //
 // # Cookie secret rotation
 //
@@ -77,6 +108,14 @@
 // stop that (it breaks io.ReaderFrom and http.Flusher). If you set
 // Cache-Control on a route that can carry a session, set
 // "private, no-store".
+//
+// A page that renders differently for logged-in and anonymous users
+// must not be stored by a shared cache, whichever middleware it sits
+// behind. Its anonymous rendering gets Vary: Cookie but no
+// Cache-Control, so nothing but Vary keeps a CDN from serving that
+// copy to a logged-in user -- and real CDNs do not honor Vary on
+// Cookie reliably. Set "private, no-store" yourself on any route whose
+// body depends on login state.
 //
 // Before writing the session cookie the package drops any queued
 // Set-Cookie of the same name, so the last writer wins. Matching
@@ -377,41 +416,22 @@ func WithSessionMaxLifetime(d time.Duration) Option {
 // own session is still live and bounces straight back, the callback
 // mints a fresh cookie, and the validator rejects it again, until the
 // browser gives up. Judge a session by its issue time instead, as the
-// revocation epoch below does; a freshly minted issuedAt is at or after
-// the epoch, so logging in ends the cycle.
+// revocation epoch pattern does (see "Revoking sessions" in the
+// package doc); a freshly minted issuedAt is at or after the epoch, so
+// logging in ends the cycle.
 //
 // It runs on the request path of every authenticated request, so it
 // must be fast and concurrency-safe. It is not called at all when the
 // cookie is absent, malformed, or fails signature verification.
-//
-// This library does not recover from a panicking validator. What the
-// client sees is whatever the app's own recovery middleware does; with
-// none, net/http's per-connection recovery logs the panic and closes
-// the connection without writing a status, HTTP/2 resets the stream,
-// and a directly invoked handler propagates the panic. Recover inside
-// the validator, or mount recovery middleware.
 //
 // The User passed in is read-only. Its Extra map is the same map the
 // handler later reads from the request context, shared rather than
 // copied, so writing to it corrupts what the handler sees and races
 // other requests. Do not mutate or retain it.
 //
-// issuedAt is in UTC and has whole-second resolution: it is the mint
-// time truncated to a Unix second. An application comparing against a
-// full-precision timestamp must truncate it the same way --
-// epoch.Truncate(time.Second) -- or a session minted later in the
-// same second as the epoch will appear to precede it and be rejected
-// for no reason. The cost of truncating is that sessions minted
-// earlier in the epoch's own second survive it; the epoch takes full
-// effect from the next second on.
-//
-// The canonical use is "log out everywhere": store a revocation epoch
-// per user and reject any session with issuedAt strictly before it.
-// Set that epoch to now, never to the current cookie's IssuedAt. A
-// stolen cookie is a clone of the user's own and carries the same
-// IssuedAt, so a strictly-before comparison against it would spare the
-// attacker along with the user. Setting the epoch to now revokes both
-// and forces the user to re-authenticate, which is the point.
+// issuedAt is in UTC and has whole-second resolution. For the
+// revocation epoch pattern this hook exists for, and the truncation
+// rule that comes with it, see "Revoking sessions" in the package doc.
 func WithSessionValidator(fn func(ctx context.Context, u User, issuedAt time.Time) (bool, error)) Option {
 	return func(a *Auth) error {
 		if fn == nil {
