@@ -1118,25 +1118,6 @@ func TestSessionValidatorNotCalledOnUnverifiedCookie(t *testing.T) {
 	})
 }
 
-// TestNoSessionValidatorUnchanged pins the default: with no validator
-// configured, a session inside the renew window is accepted and
-// renewed exactly as before the hook existed.
-func TestNoSessionValidatorUnchanged(t *testing.T) {
-	a, c, advance := renewalFixture(t)
-	if a.sessionValidator != nil {
-		t.Fatal("sessionValidator set by default")
-	}
-	advance(31 * time.Minute)
-
-	rr, ok := serveAuthenticated(a, c, nil)
-	if !*ok {
-		t.Error("valid session rejected with no validator set")
-	}
-	if sessionCookieOrNil(rr, a.sessionName()) == nil {
-		t.Error("no renewal with no validator set")
-	}
-}
-
 // TestSessionValidatorEpochBoundary pins the comparison the doc
 // comment on WithSessionValidator prescribes. An epoch equal to a live
 // session's IssuedAt leaves it alone -- which is why "log out

@@ -17,6 +17,9 @@ import (
 func TestOptionSettersApply(t *testing.T) {
 	known := func(string, string) bool { return true }
 	a := &Auth{}
+	if a.sessionValidator != nil {
+		t.Fatal("sessionValidator set before any option ran")
+	}
 	opts := []Option{
 		WithSessionLifetime(2 * time.Hour),
 		WithSessionRenewWindow(time.Hour),
@@ -28,6 +31,7 @@ func TestOptionSettersApply(t *testing.T) {
 		ForceApprovalIfNewUser(known),
 		WithForceConsentParams(map[string]string{"prompt": "consent"}),
 		WithExtraClaims("groups", "roles"),
+		WithSessionValidator(func(User, time.Time) bool { return true }),
 	}
 	for _, opt := range opts {
 		if err := opt(a); err != nil {
@@ -64,6 +68,9 @@ func TestOptionSettersApply(t *testing.T) {
 	}
 	if !reflect.DeepEqual(a.extraClaims, []string{"groups", "roles"}) {
 		t.Errorf("extraClaims = %v, want [groups roles]", a.extraClaims)
+	}
+	if a.sessionValidator == nil {
+		t.Errorf("sessionValidator not set")
 	}
 }
 
