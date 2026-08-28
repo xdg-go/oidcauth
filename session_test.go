@@ -477,6 +477,13 @@ func TestCookieRejectionReasonsWrapErrBadCookie(t *testing.T) {
 			t.Errorf("%v does not wrap errBadCookie", err)
 		}
 	}
+	// The deliberate exception: an inconclusive validator is an
+	// operational failure, not a cookie rejection, and folding it into
+	// the block above "for consistency" would make the middlewares
+	// disguise an outage as an expired session.
+	if errors.Is(errValidatorFailed, errBadCookie) {
+		t.Error("errValidatorFailed wraps errBadCookie")
+	}
 }
 
 func TestWithLoggerRejectsNil(t *testing.T) {

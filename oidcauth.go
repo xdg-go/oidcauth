@@ -240,7 +240,7 @@ type Auth struct {
 	forceConsentParams map[string]string
 	extraClaims        []string
 
-	sessionValidator func(u User, issuedAt time.Time) bool
+	sessionValidator func(ctx context.Context, u User, issuedAt time.Time) (bool, error)
 
 	logger *slog.Logger
 
@@ -339,10 +339,36 @@ func WithSessionMaxLifetime(d time.Duration) Option {
 
 // WithSessionValidator sets an app-supplied check that runs on every
 // session verification, after the cookie's signature, issue time,
-// expiry, and max lifetime have all passed. Returning false rejects
-// the session exactly as an expired cookie is rejected: the same
-// response, and no renewed cookie. The client is told nothing about
-// why, so the validator is free to consult app state.
+// expiry, and max lifetime have all passed. It has three outcomes:
+//
+//   - (true, nil) accepts the session.
+//   - (false, nil) rejects it exactly as an expired cookie is
+//     rejected: the same response, and no renewed cookie. The client
+//     is told nothing about why, so the validator is free to consult
+//     app state.
+//   - a non-nil error says the validator could not tell. That is an
+//     operational failure, not an authorization decision, so it is not
+//     disguised as an expired session: [Auth.RequireAuth] answers 503,
+//     bare [Auth.Authenticate] treats the request as anonymous so a
+//     public page does not go down with the revocation store, and
+//     nothing is renewed either way. The error is logged at warn,
+//     except a failure that is just the caller going away -- a
+//     canceled or timed-out request context -- which is logged at
+//     debug because it is ordinary traffic rather than an outage. Only
+//     the log level distinguishes the two; the outcome is the same.
+//     The error's text is logged verbatim, so put nothing in it you
+//     would not want in logs: a driver error often carries the failed
+//     statement and its parameters, which is to say the user's sub.
+//
+// There is no fail-open/fail-closed option. An app that would rather
+// let requests through during its own outage returns (true, nil) on
+// its internal error; one that would rather shut them out returns the
+// error.
+//
+// ctx is the request's context, so a validator doing I/O should pass
+// it down and honor cancellation: a client that went away or a server
+// write timeout then cancels the lookup instead of tying up the
+// request.
 //
 // The validator is not consulted at login: a successful callback mints
 // a session cookie without asking. A rule that rejects on identity
@@ -355,11 +381,15 @@ func WithSessionMaxLifetime(d time.Duration) Option {
 // the epoch, so logging in ends the cycle.
 //
 // It runs on the request path of every authenticated request, so it
-// must be fast, concurrency-safe, and must not block on a slow
-// dependency. It is not called at all when the cookie is absent,
-// malformed, or fails signature verification. A panic is not caught
-// here: it propagates to net/http's per-connection recovery, which
-// closes the request with a 500 and no cookie written.
+// must be fast and concurrency-safe. It is not called at all when the
+// cookie is absent, malformed, or fails signature verification.
+//
+// This library does not recover from a panicking validator. What the
+// client sees is whatever the app's own recovery middleware does; with
+// none, net/http's per-connection recovery logs the panic and closes
+// the connection without writing a status, HTTP/2 resets the stream,
+// and a directly invoked handler propagates the panic. Recover inside
+// the validator, or mount recovery middleware.
 //
 // The User passed in is read-only. Its Extra map is the same map the
 // handler later reads from the request context, shared rather than
@@ -382,7 +412,7 @@ func WithSessionMaxLifetime(d time.Duration) Option {
 // IssuedAt, so a strictly-before comparison against it would spare the
 // attacker along with the user. Setting the epoch to now revokes both
 // and forces the user to re-authenticate, which is the point.
-func WithSessionValidator(fn func(u User, issuedAt time.Time) bool) Option {
+func WithSessionValidator(fn func(ctx context.Context, u User, issuedAt time.Time) (bool, error)) Option {
 	return func(a *Auth) error {
 		if fn == nil {
 			return errors.New("oidcauth: session validator must not be nil")

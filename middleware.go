@@ -2,6 +2,7 @@ package oidcauth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"time"
@@ -32,6 +33,12 @@ type authResult struct {
 	// when ok is true.
 	session sessionPayload
 	ok      bool
+	// failed reports that the session validator could not reach a
+	// verdict. It is a third outcome, not a flavor of !ok: an outage
+	// in the app's revocation store is an operational failure, so
+	// [Auth.RequireAuth] answers it with 5xx instead of the redirect
+	// or 401 an expired cookie earns.
+	failed bool
 	// at is the clock reading that verified this request. A later
 	// renewal decision reuses it so one request cannot straddle the
 	// moment a session expires.
@@ -118,12 +125,14 @@ func (a *Auth) verifyOnce(w http.ResponseWriter, r *http.Request) (authResult, *
 	// expires.
 	now := a.now()
 	s, err := a.sessionFromRequestAt(r, now)
-	res := authResult{owner: a, session: s, ok: err == nil, at: now}
-	if res.ok {
+	res := authResult{owner: a, session: s, ok: err == nil, failed: errors.Is(err, errValidatorFailed), at: now}
+	if res.ok || res.failed {
 		// The response may depend on who is logged in, so a shared
 		// cache must not serve it to another user. Anonymous requests
 		// keep whatever the app chose, so public pages stay
-		// shared-cacheable.
+		// shared-cacheable. A failed verification is marked too:
+		// nothing should let an intermediary serve one user's 503 to
+		// everyone and stretch the outage.
 		markPrivateResponse(w)
 	}
 	return res, r.WithContext(context.WithValue(r.Context(), ctxKey{}, res))
@@ -133,7 +142,10 @@ func (a *Auth) verifyOnce(w http.ResponseWriter, r *http.Request) (authResult, *
 // The verified [User] is placed in the request context for
 // [UserFromContext]. Unauthenticated GET/HEAD requests are redirected
 // to the login handler with `next` set to the requested path; other
-// methods get 401.
+// methods get 401. A session validator that reports failure rather
+// than a verdict (see [WithSessionValidator]) gets 503: an outage is
+// not an authentication failure, and a login redirect could not fix
+// it.
 //
 // RequireAuth composes on [Auth.Authenticate]: it reuses an outer
 // mount's result, or verifies inline, writing the same cache headers a
@@ -147,6 +159,13 @@ func (a *Auth) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		res, r := a.verifyOnce(w, r)
 		if !res.ok {
+			// An inconclusive validator is not an authentication
+			// failure: redirecting to login would send the user
+			// through a loop that cannot succeed, so say so instead.
+			if res.failed {
+				http.Error(w, "session verification unavailable", http.StatusServiceUnavailable)
+				return
+			}
 			if r.Method == http.MethodGet || r.Method == http.MethodHead {
 				v := url.Values{"next": {r.URL.RequestURI()}}
 				http.Redirect(w, r, a.loginPath+"?"+v.Encode(), http.StatusFound)
@@ -174,4 +193,29 @@ func UserFromContext(ctx context.Context) (u User, ok bool) {
 		return User{}, false
 	}
 	return res.session.User, true
+}
+
+// SessionUnavailableFromContext reports whether session verification
+// failed operationally for this request -- the app's own
+// [WithSessionValidator] returned an error rather than a verdict. It
+// is the third outcome behind a false ok from [UserFromContext], which
+// alone cannot tell an anonymous request from one whose session could
+// not be checked. An app with its own gate uses it to answer 503
+// instead of sending the user into a login loop that cannot succeed:
+//
+//	u, ok := oidcauth.UserFromContext(ctx)
+//	if !ok {
+//		if oidcauth.SessionUnavailableFromContext(ctx) {
+//			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+//			return
+//		}
+//		redirectToLogin(w, r)
+//	}
+//
+// It is false when no middleware of this package ran, and false for a
+// session the validator merely rejected: that is an authorization
+// decision, and the client is told nothing about it.
+func SessionUnavailableFromContext(ctx context.Context) bool {
+	res, ok := ctx.Value(ctxKey{}).(authResult)
+	return ok && res.failed
 }

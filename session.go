@@ -64,6 +64,14 @@ var (
 	errCorruptPayload = fmt.Errorf("%w: corrupt payload", errBadCookie)
 )
 
+// errValidatorFailed reports that the session validator could not
+// reach a verdict -- a lookup timed out, the revocation store was
+// down. It deliberately does NOT wrap errBadCookie: the cookie may be
+// perfectly good, and an operational failure must not be reported to
+// the caller as an authorization decision. The middlewares answer it
+// differently from every errBadCookie reason.
+var errValidatorFailed = errors.New("oidcauth: session validator failed")
+
 // rejectCookie logs why a signed cookie was rejected and returns the
 // reason unchanged. The log names the failure class only -- never a
 // cookie value, signature, or user identity -- and stays at debug
@@ -74,6 +82,25 @@ func (a *Auth) rejectCookie(purpose string, err error) error {
 		a.logger.Debug("oidcauth: cookie rejected", "cookie", purpose, "reason", err.Error())
 	}
 	return err
+}
+
+// validatorFailed logs an inconclusive session validator and wraps its
+// error. It is warn, not the debug used for cookie rejections: a
+// rejected cookie is routine traffic, while a validator that cannot
+// answer is an outage in a dependency the operator needs to see.
+//
+// A validator that honors ctx cancellation reports one every time a
+// client aborts mid-request, which is ordinary traffic rather than an
+// outage -- and an authenticated client could otherwise flood the warn
+// level on purpose. Those drop to debug. Only the level changes: the
+// caller still sees errValidatorFailed.
+func (a *Auth) validatorFailed(ctx context.Context, err error) error {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		a.logger.Debug("oidcauth: session validator canceled", "reason", err.Error())
+	} else {
+		a.logger.Warn("oidcauth: session validator failed", "reason", err.Error())
+	}
+	return fmt.Errorf("%w: %w", errValidatorFailed, err)
 }
 
 // sessionPayload is the signed content of the app session cookie.
@@ -286,9 +313,19 @@ func (a *Auth) sessionFromRequestAt(r *http.Request, now time.Time) (sessionPayl
 	// user or issue time it cannot trust. Rejecting here rather than
 	// in the middleware means the request is indistinguishable from
 	// one carrying an expired cookie: same response, and no renewal,
-	// because renewal only ever runs on a session that verified.
-	if a.sessionValidator != nil && !a.sessionValidator(s.User, time.Unix(s.IssuedAt, 0).UTC()) {
-		return sessionPayload{}, a.rejectCookie(purposeSession, errValidatorRejected)
+	// because renewal only ever runs on a session that verified. A
+	// validator that cannot answer is a separate outcome: it returns
+	// errValidatorFailed, which the middlewares must not disguise as
+	// an expired session.
+	if a.sessionValidator != nil {
+		ctx := r.Context()
+		ok, err := a.sessionValidator(ctx, s.User, time.Unix(s.IssuedAt, 0).UTC())
+		if err != nil {
+			return sessionPayload{}, a.validatorFailed(ctx, err)
+		}
+		if !ok {
+			return sessionPayload{}, a.rejectCookie(purposeSession, errValidatorRejected)
+		}
 	}
 	return s, nil
 }

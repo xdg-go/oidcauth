@@ -1,13 +1,16 @@
 package oidcauth
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -373,7 +376,9 @@ func sessionCookieOrNil(rr *httptest.ResponseRecorder, name string) *http.Cookie
 func serveAuthenticated(a *Auth, c *http.Cookie, h http.Handler) (*httptest.ResponseRecorder, *bool) {
 	sawUser := new(bool)
 	req := httptest.NewRequest(http.MethodGet, "/page", nil)
-	req.AddCookie(c)
+	if c != nil {
+		req.AddCookie(c)
+	}
 	rr := httptest.NewRecorder()
 	a.Authenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, ok := UserFromContext(r.Context())
@@ -976,13 +981,13 @@ func TestNoRenewalWithoutValidSession(t *testing.T) {
 // validatorFixture is renewalFixture plus an app-supplied session
 // validator, recording every call so a test can assert the validator
 // never saw a request the library should have rejected on its own.
-func validatorFixture(t *testing.T, fn func(u User, issuedAt time.Time) bool) (a *Auth, c *http.Cookie, advance func(time.Duration), calls *int) {
+func validatorFixture(t *testing.T, fn func(ctx context.Context, u User, issuedAt time.Time) (bool, error)) (a *Auth, c *http.Cookie, advance func(time.Duration), calls *int) {
 	t.Helper()
 	a, c, advance = renewalFixture(t)
 	calls = new(int)
-	wrapped := func(u User, issuedAt time.Time) bool {
+	wrapped := func(ctx context.Context, u User, issuedAt time.Time) (bool, error) {
 		*calls++
-		return fn(u, issuedAt)
+		return fn(ctx, u, issuedAt)
 	}
 	if err := WithSessionValidator(wrapped)(a); err != nil {
 		t.Fatalf("WithSessionValidator: %v", err)
@@ -993,7 +998,13 @@ func validatorFixture(t *testing.T, fn func(u User, issuedAt time.Time) bool) (a
 // serveRequireAuth runs RequireAuth with cookie c, or with no cookie
 // at all when c is nil.
 func serveRequireAuth(a *Auth, c *http.Cookie) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, "/private", nil)
+	return serveRequireAuthMethod(a, c, http.MethodGet)
+}
+
+// serveRequireAuthMethod is serveRequireAuth with the request method
+// chosen, for the cases where RequireAuth's GET/HEAD split matters.
+func serveRequireAuthMethod(a *Auth, c *http.Cookie, method string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, "/private", nil)
 	if c != nil {
 		req.AddCookie(c)
 	}
@@ -1012,11 +1023,11 @@ func serveRequireAuth(a *Auth, c *http.Cookie) *httptest.ResponseRecorder {
 // session lifetime.
 func TestSessionValidatorRejectsOldIssueTime(t *testing.T) {
 	var gotSub string
-	a, c, advance, calls := validatorFixture(t, func(u User, issuedAt time.Time) bool {
+	a, c, advance, calls := validatorFixture(t, func(_ context.Context, u User, issuedAt time.Time) (bool, error) {
 		gotSub = u.Sub
 		// Epoch one minute after the cookie was minted.
 		epoch := time.Date(2026, 8, 21, 0, 1, 0, 0, time.UTC)
-		return !issuedAt.Before(epoch)
+		return !issuedAt.Before(epoch), nil
 	})
 	advance(5 * time.Minute)
 	got := serveRequireAuth(a, c)
@@ -1050,7 +1061,7 @@ func TestSessionValidatorRejectsOldIssueTime(t *testing.T) {
 // not be handed a fresh cookie, even though its clock puts it well
 // inside the renew window.
 func TestSessionValidatorSuppressesRenewal(t *testing.T) {
-	a, c, advance, calls := validatorFixture(t, func(User, time.Time) bool { return false })
+	a, c, advance, calls := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) { return false, nil })
 	advance(31 * time.Minute) // renew window opens at +30m
 
 	rr, ok := serveAuthenticated(a, c, nil)
@@ -1069,7 +1080,7 @@ func TestSessionValidatorSuppressesRenewal(t *testing.T) {
 // case: a configured validator that accepts leaves renewal alone, so
 // an accepting hook costs a session nothing.
 func TestSessionValidatorAcceptsAndRenews(t *testing.T) {
-	a, c, advance, calls := validatorFixture(t, func(User, time.Time) bool { return true })
+	a, c, advance, calls := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) { return true, nil })
 	advance(31 * time.Minute) // renew window opens at +30m
 
 	rr, ok := serveAuthenticated(a, c, nil)
@@ -1090,7 +1101,7 @@ func TestSessionValidatorAcceptsAndRenews(t *testing.T) {
 func TestSessionValidatorNotCalledOnUnverifiedCookie(t *testing.T) {
 	valid := func(t *testing.T) (*Auth, *http.Cookie, *int) {
 		t.Helper()
-		a, c, _, calls := validatorFixture(t, func(User, time.Time) bool { return true })
+		a, c, _, calls := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) { return true, nil })
 		return a, c, calls
 	}
 
@@ -1135,8 +1146,8 @@ func TestSessionValidatorEpochBoundary(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var epoch time.Time
-			a, c, advance, calls := validatorFixture(t, func(_ User, issuedAt time.Time) bool {
-				return !issuedAt.Before(epoch)
+			a, c, advance, calls := validatorFixture(t, func(_ context.Context, _ User, issuedAt time.Time) (bool, error) {
+				return !issuedAt.Before(epoch), nil
 			})
 			mintedAt := a.now()
 			epoch = mintedAt.Add(tc.epochAfter)
@@ -1165,9 +1176,9 @@ func TestSessionValidatorSubSecondEpoch(t *testing.T) {
 	a.now = func() time.Time { return now }
 
 	calls := 0
-	err := WithSessionValidator(func(_ User, issuedAt time.Time) bool {
+	err := WithSessionValidator(func(_ context.Context, _ User, issuedAt time.Time) (bool, error) {
 		calls++
-		return !issuedAt.Before(epoch.Truncate(time.Second))
+		return !issuedAt.Before(epoch.Truncate(time.Second)), nil
 	})(a)
 	if err != nil {
 		t.Fatalf("WithSessionValidator: %v", err)
@@ -1183,4 +1194,337 @@ func TestSessionValidatorSubSecondEpoch(t *testing.T) {
 	if calls != 1 {
 		t.Errorf("validator calls = %d, want 1", calls)
 	}
+}
+
+// TestSessionValidatorErrorRequireAuth pins the third outcome: a
+// validator that cannot reach a verdict is an outage, not an
+// authorization decision, so RequireAuth must answer 5xx rather than
+// the login redirect an expired cookie earns.
+func TestSessionValidatorErrorRequireAuth(t *testing.T) {
+	a, c, advance, calls := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) {
+		return false, errors.New("revocation store down")
+	})
+	advance(5 * time.Minute)
+
+	got := serveRequireAuth(a, c)
+	if *calls != 1 {
+		t.Errorf("validator calls = %d, want 1", *calls)
+	}
+	if got.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", got.Code, http.StatusServiceUnavailable)
+	}
+
+	// The response an expired cookie gets, for contrast: the failure
+	// must not be disguised as one.
+	b, bc, badvance := renewalFixture(t)
+	badvance(b.sessionLifetime + time.Minute)
+	if expired := serveRequireAuth(b, bc); got.Code == expired.Code {
+		t.Errorf("validator failure answered with the expired-session status %d", expired.Code)
+	}
+}
+
+// TestSessionValidatorErrorAuthenticateIsAnonymous pins the other
+// half: a public page must not go down because the app's revocation
+// store did. The handler still runs, seeing an anonymous request.
+func TestSessionValidatorErrorAuthenticateIsAnonymous(t *testing.T) {
+	a, c, advance, calls := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) {
+		return false, errors.New("revocation store down")
+	})
+	advance(5 * time.Minute)
+
+	ran := false
+	rr, ok := serveAuthenticated(a, c, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ran = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	if !ran {
+		t.Error("handler did not run")
+	}
+	if *ok {
+		t.Error("request seen as logged in despite a failed validator")
+	}
+	if *calls != 1 {
+		t.Errorf("validator calls = %d, want 1", *calls)
+	}
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+}
+
+// TestSessionValidatorErrorSuppressesRenewal: an unverifiable session
+// is not renewed, so an outage cannot extend sessions it can no longer
+// check.
+func TestSessionValidatorErrorSuppressesRenewal(t *testing.T) {
+	a, c, advance, _ := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) {
+		return true, errors.New("revocation store down")
+	})
+	advance(31 * time.Minute) // renew window opens at +30m
+
+	rr, _ := serveAuthenticated(a, c, nil)
+	if got := sessionSetCookies(rr, a.sessionName()); len(got) != 0 {
+		t.Errorf("renewed a session the validator could not check: %q", got)
+	}
+}
+
+// TestSessionValidatorReceivesRequestContext pins that the context
+// handed to the validator is the request's own, so a validator doing
+// I/O can honor cancellation and request-scoped values.
+func TestSessionValidatorReceivesRequestContext(t *testing.T) {
+	type reqKey struct{}
+
+	var gotValue any
+	var gotErr error
+	a, c, _, calls := validatorFixture(t, func(ctx context.Context, _ User, _ time.Time) (bool, error) {
+		gotValue = ctx.Value(reqKey{})
+		gotErr = ctx.Err()
+		return true, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), reqKey{}, "marker"))
+	cancel() // cancellation is observable inside the validator
+	req := httptest.NewRequest(http.MethodGet, "/page", nil).WithContext(ctx)
+	req.AddCookie(c)
+	a.Authenticate(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).
+		ServeHTTP(httptest.NewRecorder(), req)
+
+	if *calls != 1 {
+		t.Fatalf("validator calls = %d, want 1", *calls)
+	}
+	if gotValue != "marker" {
+		t.Errorf("ctx value = %v, want %q (not the request's context)", gotValue, "marker")
+	}
+	if !errors.Is(gotErr, context.Canceled) {
+		t.Errorf("ctx.Err() = %v, want %v", gotErr, context.Canceled)
+	}
+}
+
+// TestSessionValidatorErrorRequireAuthNonGET pins that the failure
+// outcome is decided before RequireAuth's GET/HEAD split: a POST
+// during an outage must get the same 503, not the 401 an
+// unauthenticated POST earns.
+func TestSessionValidatorErrorRequireAuthNonGET(t *testing.T) {
+	a, c, advance, calls := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) {
+		return false, errors.New("revocation store down")
+	})
+	advance(5 * time.Minute)
+
+	got := serveRequireAuthMethod(a, c, http.MethodPost)
+	if *calls != 1 {
+		t.Errorf("validator calls = %d, want 1", *calls)
+	}
+	if got.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", got.Code, http.StatusServiceUnavailable)
+	}
+}
+
+// TestSessionValidatorErrorComposedMiddleware is the realistic
+// production mounting: Authenticate wraps the whole tree and
+// RequireAuth guards a route inside it. The failure has to survive the
+// verify-once context handoff, or the inner RequireAuth falls back to
+// the login redirect this outcome exists to prevent.
+func TestSessionValidatorErrorComposedMiddleware(t *testing.T) {
+	a, c, advance, calls := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) {
+		return false, errors.New("revocation store down")
+	})
+	advance(5 * time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/private", nil)
+	req.AddCookie(c)
+	rr := httptest.NewRecorder()
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	a.Authenticate(a.RequireAuth(h)).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusServiceUnavailable)
+	}
+	// The cookie is verified once however the middlewares nest, so the
+	// app's validator is consulted once too.
+	if *calls != 1 {
+		t.Errorf("validator calls = %d, want 1", *calls)
+	}
+}
+
+// TestSessionUnavailableFromContext pins the accessor an app with its
+// own gate needs: it must separate an outage from the two states that
+// legitimately look anonymous, since only the outage must not redirect
+// to login.
+func TestSessionUnavailableFromContext(t *testing.T) {
+	cases := []struct {
+		name       string
+		validator  func(context.Context, User, time.Time) (bool, error)
+		withCookie bool
+		want       bool
+	}{
+		{"validator failed", func(context.Context, User, time.Time) (bool, error) {
+			return false, errors.New("revocation store down")
+		}, true, true},
+		{"validator rejected", func(context.Context, User, time.Time) (bool, error) {
+			return false, nil
+		}, true, false},
+		{"valid session", func(context.Context, User, time.Time) (bool, error) {
+			return true, nil
+		}, true, false},
+		{"anonymous", func(context.Context, User, time.Time) (bool, error) {
+			return true, nil
+		}, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, c, advance, _ := validatorFixture(t, tc.validator)
+			advance(5 * time.Minute)
+			if !tc.withCookie {
+				c = nil
+			}
+
+			var got bool
+			ran := false
+			serveAuthenticated(a, c, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ran = true
+				got = SessionUnavailableFromContext(r.Context())
+			}))
+			if !ran {
+				t.Fatal("handler did not run")
+			}
+			if got != tc.want {
+				t.Errorf("SessionUnavailableFromContext = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSessionUnavailableFromContextWithoutMiddleware: with no sentinel
+// on the context there is nothing to report, and the app falls through
+// to its ordinary anonymous handling.
+func TestSessionUnavailableFromContextWithoutMiddleware(t *testing.T) {
+	if SessionUnavailableFromContext(context.Background()) {
+		t.Error("reported unavailable with no middleware on the context")
+	}
+}
+
+// logCapture is a minimal slog.Handler that keeps every record so a
+// test can assert the level something was logged at. It is safe for
+// concurrent use because a handler installed on an Auth may be reached
+// from more than one request goroutine.
+type logCapture struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *logCapture) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *logCapture) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+
+func (h *logCapture) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *logCapture) WithGroup(string) slog.Handler      { return h }
+
+// matching returns the level and message of every captured record
+// whose message contains substr.
+func (h *logCapture) matching(substr string) []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []slog.Record
+	for _, r := range h.records {
+		if strings.Contains(r.Message, substr) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// captureLogs points a's logger at a fresh capture, replacing the
+// discarding logger the fixtures install.
+func captureLogs(t *testing.T, a *Auth) *logCapture {
+	t.Helper()
+	h := &logCapture{}
+	if err := WithLogger(slog.New(h))(a); err != nil {
+		t.Fatalf("WithLogger: %v", err)
+	}
+	return h
+}
+
+// wantValidatorLog asserts that exactly one session-validator record
+// was logged, at level want.
+func wantValidatorLog(t *testing.T, h *logCapture, want slog.Level) {
+	t.Helper()
+	got := h.matching("session validator")
+	if len(got) != 1 {
+		t.Fatalf("session validator records = %d, want 1: %v", len(got), got)
+	}
+	if got[0].Level != want {
+		t.Errorf("logged %q at %v, want %v", got[0].Message, got[0].Level, want)
+	}
+}
+
+// TestValidatorFailureLogsWarn: an ordinary validator error is an
+// outage in a dependency the operator needs to see, so it is warn.
+func TestValidatorFailureLogsWarn(t *testing.T) {
+	a, c, advance, _ := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) {
+		return false, errors.New("revocation store unreachable")
+	})
+	h := captureLogs(t, a)
+	advance(5 * time.Minute)
+
+	if got := serveRequireAuth(a, c); got.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", got.Code)
+	}
+	wantValidatorLog(t, h, slog.LevelWarn)
+}
+
+// TestValidatorCanceledLogsDebug: the doc tells validators to honor
+// cancellation, so a correct one reports the context error on every
+// aborted or timed-out request. That is ordinary traffic, and a client
+// could amplify it on purpose, so it drops to debug -- with the same
+// 503. Both context errors are wrapped, to pin errors.Is rather than
+// equality.
+func TestValidatorCanceledLogsDebug(t *testing.T) {
+	for name, cause := range map[string]error{
+		"canceled":          context.Canceled,
+		"deadline exceeded": context.DeadlineExceeded,
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, c, advance, _ := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) {
+				return false, fmt.Errorf("lookup: %w", cause)
+			})
+			h := captureLogs(t, a)
+			advance(5 * time.Minute)
+
+			if got := serveRequireAuth(a, c); got.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503", got.Code)
+			}
+			wantValidatorLog(t, h, slog.LevelDebug)
+		})
+	}
+}
+
+// TestValidatorFailureOnCanceledRequestLogsDebug: the client is
+// already gone, so whatever error the validator reports is a
+// consequence of that, not an outage.
+func TestValidatorFailureOnCanceledRequestLogsDebug(t *testing.T) {
+	a, c, advance, calls := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) {
+		return false, errors.New("read tcp: use of closed network connection")
+	})
+	h := captureLogs(t, a)
+	advance(5 * time.Minute)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodGet, "/private", nil).WithContext(ctx)
+	req.AddCookie(c)
+	rr := httptest.NewRecorder()
+	a.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})).ServeHTTP(rr, req)
+
+	if *calls != 1 {
+		t.Fatalf("validator calls = %d, want 1", *calls)
+	}
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rr.Code)
+	}
+	wantValidatorLog(t, h, slog.LevelDebug)
 }

@@ -314,11 +314,87 @@ The skeleton's per-user revocation epoch needs to see `IssuedAt`.
 - [x] **Test**: an epoch equal to a live session's `IssuedAt` does not
       revoke it, and an epoch of `now` does
 
+### 4.3 Let the validator report backend failure
+
+Review feedback on the shipped 4.2 API. The hook's canonical
+implementation is a database or cache lookup, but a `bool` return
+cannot say "I cannot tell right now". On an outage the app must either
+fail closed -- which rejects freshly minted cookies too, reproducing
+the callback redirect loop 4.2's doc warns against -- or fail open,
+silently disabling revocation during exactly the incident where someone
+may be trying to revoke. Fix before the Phase 5 tag; after it, this is
+a breaking change.
+
+- [x] Change the signature to
+      `func(ctx context.Context, u User, issuedAt time.Time) (bool, error)`.
+      The context comes from the request, so a validator can honor
+      cancellation and server timeouts; drop the "must not block on a
+      slow dependency" advice it was standing in for
+- [x] Thread a third outcome through `verifyOnce`: valid, rejected, and
+      failed. Rejected keeps the existing expiry-indistinguishable
+      response; failed must NOT mimic it, since an outage is not an
+      authorization decision
+- [x] `RequireAuth` answers a validator error with 5xx
+- [x] Bare `Authenticate` treats a validator error as anonymous: a
+      public page must not go down because the revocation store did
+- [x] Add no failure-mode option. An app wanting fail-open returns
+      `(true, nil)` on its own error; one wanting fail-closed returns
+      the error. One library behavior, the choice stays with the app
+- [x] Log a validator error at warn with a distinguishing reason,
+      separate from the debug-level cookie rejections
+- [x] **Test**: a validator returning an error under `RequireAuth`
+      yields 5xx, not the expired-session response
+- [x] **Test**: a validator returning an error under bare
+      `Authenticate` yields an anonymous request, and the handler runs
+- [x] **Test**: a validator error suppresses renewal
+- [x] **Test**: `(false, nil)` still produces the expired-session
+      response, unchanged from 4.2
+- [x] **Test**: the context passed to the validator is the request's,
+      and its cancellation is observable
+- [x] Update every 4.2 test and the `WithSessionValidator` doc comment
+      to the new signature
+- [x] Export `SessionUnavailableFromContext(ctx) bool` so an app with
+      its own gate can answer 503 rather than redirecting. Without it
+      `UserFromContext` collapses anonymous, rejected, and failed into
+      one `ok == false`, and an app rolling its own gate reintroduces
+      the very redirect loop 4.3 exists to prevent
+- [x] Log a validator failure at debug, not warn, when the cause is the
+      client going away (`context.Canceled`, deadline exceeded). The doc
+      tells validators to honor cancellation, so a correct one reports
+      it on every aborted request; at warn that is normal traffic
+      drowning the signal, and a client can amplify it deliberately
+- [x] Document that the validator error's text reaches the log, so
+      callers should keep identifiers out of it
+- [x] Mark the 503 response private, so an error-caching intermediary
+      cannot serve one user's outage response to others
+- [x] **Test**: the negative invariant -- `errValidatorFailed` must NOT
+      wrap `errBadCookie`. Every other reason does, and folding it in
+      "for consistency" would leave every existing test green
+- [x] **Test**: `Authenticate(RequireAuth(h))` under a validator error
+      yields 503, pinning that the outcome survives the verify-once
+      context reuse rather than being recomputed
+- [x] **Test**: a non-GET `RequireAuth` request under a validator error
+      yields 503, not 401
+
+### 4.4 Correct the panic documentation
+
+- [x] The 4.2 doc claims a panicking validator yields "a 500 with no
+      cookie written". Verified false: `net/http`'s `conn.serve`
+      recover only logs and closes the connection, HTTP/2 sends a
+      stream reset, and direct invocation propagates. Document that
+      this library does not recover, so the outcome is whatever the
+      app's own recovery middleware does and the transport aborts
+      absent one. Do not add a recover to the library
+
 ---
 
 ## Phase 5: Documentation and Release
 
 ### 5.1 Docs
+- [ ] Split the `WithSessionValidator` doc comment: it now runs ~70
+      lines over four jobs. Keep the three-outcome contract on the
+      option; move the panic/recovery discussion and the
+      epoch-comparison rationale to the package doc's session section
 - [ ] README: session lifetime model, the two clocks, the defaults, and
       how an app implements revocation on top of `IssuedAt`
 - [ ] Doc comments on every new exported symbol

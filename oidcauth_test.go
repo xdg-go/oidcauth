@@ -31,7 +31,7 @@ func TestOptionSettersApply(t *testing.T) {
 		ForceApprovalIfNewUser(known),
 		WithForceConsentParams(map[string]string{"prompt": "consent"}),
 		WithExtraClaims("groups", "roles"),
-		WithSessionValidator(func(User, time.Time) bool { return true }),
+		WithSessionValidator(func(context.Context, User, time.Time) (bool, error) { return true, nil }),
 	}
 	for _, opt := range opts {
 		if err := opt(a); err != nil {
