@@ -314,9 +314,9 @@ func checkSessionDuration(name string, d time.Duration) error {
 // request -- sooner if the max lifetime cuts it short.
 //
 // Must be a whole number of seconds of at least 1s, at least the
-// renew window, and no longer than [WithSessionMaxLifetime]. Both bounds apply at their defaults, so a
-// lifetime above 365 days or below 45 days fails construction unless
-// the corresponding option is set too.
+// renew window, and no longer than [WithSessionMaxLifetime]. Both bounds apply
+// at their defaults, so a lifetime above 365 days or below 45 days fails
+// construction unless the corresponding option is set too.
 func WithSessionLifetime(d time.Duration) Option {
 	return func(a *Auth) error {
 		if err := checkSessionDuration("session lifetime", d); err != nil {
