@@ -85,21 +85,8 @@ func (a *Auth) rejectCookie(purpose string, err error) error {
 }
 
 // revocationFailed logs a revocation-lookup failure and wraps its
-// error. It is warn, not the debug used for cookie rejections: a
-// rejected cookie is routine traffic, while a lookup that cannot
-// answer is an outage in a dependency the operator needs to see. A
-// cutoff the lookup returns from the future comes here too, carrying
-// its own reason: an impossible value is a broken lookup.
-//
-// The level follows the request context's state, not the error's
-// identity. When ctx is already done the client has gone away, so a
-// lookup honoring cancellation reports an error on every aborted
-// request: ordinary traffic that an authenticated client could
-// otherwise flood the warn level with on purpose. Those drop to debug.
-// An error that merely wraps context.Canceled or DeadlineExceeded
-// while the request is still live is a dependency timeout, not a
-// departed client. That is a real outage, so it stays at warn. Only
-// the level changes: the caller still sees errRevocationFailed.
+// error. Logging normally happens at the warn level. If ctx is
+// canceled or expired, this function logs at debug level instead.
 func (a *Auth) revocationFailed(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		a.logger.Debug("oidcauth: revocation lookup canceled", "reason", err.Error())

@@ -32,9 +32,7 @@
 //
 // Only Authenticate renews. Mount at least one in the user's normal
 // browsing path, or sessions expire a full lifetime after login no
-// matter how active the user is. Nesting cannot turn renewal off: the
-// strongest mount covering a route decides, and a response never
-// carries two session cookies.
+// matter how active the user is.
 //
 // One *Auth per process; see [UserFromContext].
 //
@@ -51,37 +49,18 @@
 //
 // Renewal extends the cookie's expiration; it does not re-authenticate.
 // Claims freeze at login, so a user disabled at the provider keeps a
-// valid session until the max lifetime. A stolen cookie renews on the
-// thief's requests just as it would on the user's, so the max lifetime
-// is the only bound this package puts on it. Ending a session sooner
-// is the app's job; see "Revoking sessions" below.
-//
-// [New] requires renew window <= lifetime <= max lifetime and fails
-// rather than substituting defaults.
+// valid session until the max lifetime.
 //
 // # Revoking sessions
 //
 // [WithRevokedBefore] asks the app, on every verified session, for
-// that user's revocation cutoff: the instant before which their
-// sessions are void. A session issued before the cutoff is rejected.
-// To log a user out everywhere, store time.Now() for that user when
-// revoking and return it from the lookup.
-//
-// Store now, never the current cookie's issue time. A stolen cookie
-// carries the same issue time as the user's own (see "Session
-// lifetime" above), so a cutoff set there would spare the attacker
-// along with the user.
+// that user's revocation cutoff. A session issued before the cutoff is
+// rejected. To log a user out everywhere, store time.Now() for that
+// user when revoking and return it from the lookup.
 //
 // The lookup runs once per authenticated request, so caching the
 // cutoff is the app's job. Revocation takes effect within a second
 // of the stored time.
-//
-// This package does not recover from a panicking lookup. What the
-// client sees is whatever the app's own recovery middleware does; with
-// none, net/http's per-connection recovery logs the panic and closes
-// the connection without writing a status, HTTP/2 resets the stream,
-// and a directly invoked handler propagates the panic. Recover inside
-// the lookup, or mount recovery middleware.
 //
 // # Cookie secret rotation
 //
@@ -99,24 +78,9 @@
 // verified session without a write gets private; anonymous responses
 // are untouched. All three get Vary: Cookie.
 //
-// The headers are set before your handler runs, and your handler can
-// overwrite them. The package will not wrap http.ResponseWriter to
-// stop that (it breaks io.ReaderFrom and http.Flusher). If you set
-// Cache-Control on a route that can carry a session, set
+// The headers are set before your handler runs, and your handler can overwrite
+// them. If you set Cache-Control on a route that can carry a session, set
 // "private, no-store".
-//
-// A page that renders differently for logged-in and anonymous users
-// must not be stored by a shared cache, whichever middleware it sits
-// behind. Its anonymous rendering gets Vary: Cookie but no
-// Cache-Control, so nothing but Vary keeps a CDN from serving that
-// copy to a logged-in user -- and real CDNs do not honor Vary on
-// Cookie reliably. Set "private, no-store" yourself on any route whose
-// body depends on login state.
-//
-// Before writing the session cookie the package drops any queued
-// Set-Cookie of the same name, so the last writer wins. Matching
-// ignores Path and Domain; a handler clearing a legacy Domain= copy of
-// the same name in the same response loses that write.
 //
 // # Issuer availability
 //
@@ -178,7 +142,7 @@ type Config struct {
 	PreviousCookieSecrets []string
 }
 
-// FromEnv builds a Config from the environment:
+// FromEnv builds a Config from the environment. These are required:
 //
 //	AUTH_ISSUER, AUTH_CLIENT_ID, AUTH_CLIENT_SECRET,
 //	AUTH_REDIRECT_URL, AUTH_COOKIE_SECRET
@@ -305,14 +269,10 @@ func checkSessionDuration(name string, d time.Duration) error {
 // write (default 90 days). The deadline slides: [Auth.Authenticate]
 // renews on the first request arriving within the renew window before
 // the expiry (see [WithSessionRenewWindow], default 45 days). So an
-// active user keeps moving the deadline, while an idle user's session
-// ends between one renew window and one full lifetime after their last
-// request -- sooner if the max lifetime cuts it short.
+// active user keeps moving the deadline.
 //
 // Must be a whole number of seconds of at least 1s, at least the
-// renew window, and no longer than [WithSessionMaxLifetime]. Both bounds apply
-// at their defaults, so a lifetime above 365 days or below 45 days fails
-// construction unless the corresponding option is set too.
+// renew window, and no longer than the session max lifetime.
 func WithSessionLifetime(d time.Duration) Option {
 	return func(a *Auth) error {
 		if err := checkSessionDuration("session lifetime", d); err != nil {
@@ -327,16 +287,9 @@ func WithSessionLifetime(d time.Duration) Option {
 // an arriving request triggers renewal (default 45 days). While a
 // request lands outside the window [Auth.Authenticate] leaves the
 // cookie alone; the first request inside it re-issues the cookie with
-// a fresh lifetime. At the defaults (90-day lifetime, 45-day window)
-// renewal fires 45 days after the cookie was written.
-//
-// Setting the window equal to the session lifetime renews on every
-// request, which is the true last-request idle timeout: the deadline
-// always sits exactly one lifetime after the user's most recent
-// request. Until the session nears its max lifetime (see
-// [WithSessionMaxLifetime]), it costs a Set-Cookie on every
-// authenticated response, and per the cache rules every such response
-// is marked Cache-Control: private, no-store.
+// a fresh lifetime. At the defaults renewal fires 45 days after the cookie was
+// written. Setting the window equal to the session lifetime renews on every
+// request.
 //
 // Must be a whole number of seconds of at least 1s and must not
 // exceed the session lifetime.
@@ -352,16 +305,12 @@ func WithSessionRenewWindow(d time.Duration) Option {
 
 // WithSessionMaxLifetime sets how long a session may live from the
 // original login (default 365 days). This deadline never moves:
-// renewal preserves the original issue time, so no amount of activity
-// pushes a session past it. It is enforced on every verify, so a
-// cookie still inside its own lifetime is rejected once it reaches the
-// maximum, exactly as an expired one is. A renewal's expiry is clamped
-// to this deadline; once pinned there, later renewals compute the same
-// expiry and skip the rewrite, so the tail costs at most one extra
-// cookie write and never pushes a session past the max. The deadline is computed from the issue time
-// stored in each cookie, so lowering it applies to sessions already
-// minted. Must be a whole number of seconds of at least 1s and must
-// not be shorter than the session lifetime.
+// renewal preserves the original issue time. The deadline is computed from the
+// issue time stored in each cookie, so lowering it applies to sessions already
+// minted.
+//
+// Must be a whole number of seconds of at least 1s and must not be shorter than
+// the session lifetime.
 func WithSessionMaxLifetime(d time.Duration) Option {
 	return func(a *Auth) error {
 		if err := checkSessionDuration("session max lifetime", d); err != nil {
@@ -372,48 +321,23 @@ func WithSessionMaxLifetime(d time.Duration) Option {
 	}
 }
 
-// WithRevokedBefore sets an app-supplied lookup of the instant before
-// which this user's sessions are void. It runs on every session
+// WithRevokedBefore sets an app-supplied lookup of a revocation cutoff. Cookied
+// issued before the cutoff are treated as expired. It runs on every session
 // verification, after the cookie's signature, issue time, expiry, and
-// max lifetime have all passed, so it must be fast and
-// concurrency-safe.
+// max lifetime have all passed, so it must be fast and concurrency-safe.
+// The comparison is in whole seconds, with the returned cutoff rounded down.
 //
-// The returned time has three outcomes. The zero time revokes nothing,
-// so a store miss needs no app-side branch. A non-zero time rejects a
-// session issued before it, exactly as an expired cookie is rejected:
-// same response, and no renewed cookie. A non-nil error reports that
-// the lookup could not answer. That is an operational failure, not an
-// authorization decision: [Auth.RequireAuth] answers 503, bare
-// [Auth.Authenticate] treats the request as anonymous, and nothing is
-// renewed. The failure is logged at warn, or at debug when the request
-// context is already done, because a client that went away is
-// ordinary traffic.
+// A non-nil error indictes that the lookup was unsuccessful. Authentication
+// middleware treats it as an operational failure, not an authorization
+// decision: [Auth.RequireAuth] answers 503, bare [Auth.Authenticate] treats the
+// request as anonymous, and nothing is renewed. An error's text is logged
+// verbatim, so keep identifiers and anything else sensitive out of it.
+// A cutoff in the future is treated like an unsuccessful lookup.
 //
-// A non-zero time returned alongside a non-nil error is ignored: the
-// error wins, and the lookup counts as a failure.
-//
-// The comparison is in whole seconds, so a cutoff in the same second
-// as the serving instance's clock is honored and ordinary sub-second
-// skew between instances costs nothing. A cutoff landing in a later
-// second than that clock is treated as a lookup failure, with the same
-// outcomes as an error above. Such a value can only come from a
-// misconfigured store or from clock skew between instances, and
-// honoring it would revoke the session a fresh login is about to mint.
-// A brief, visible failure beats the silent rolling logout that
-// clamping the cutoff to now would produce.
-//
-// There is no fail-open switch. An app that would rather let requests
-// through during its own store outage returns the zero time from its
-// error path; one that would rather shut them out returns the error.
-//
-// Treat the User as read-only. Its Extra map is the same map handlers
-// read from the request context, shared rather than copied, so writing
-// to it races with them.
-//
-// ctx is the request's context: a lookup doing I/O should pass it down
-// and honor cancellation. The error's text is logged verbatim, so keep
-// identifiers, SQL, and anything else sensitive out of it. A nil fn is
-// a config error.
+// A nil fn is a config error. Treat the User as read-only. Its Extra map is the
+// same map handlers read from the request context, shared rather than copied,
+// so writing to it races with them. ctx is the request's context: a lookup
+// doing I/O should pass it down and honor cancellation.
 func WithRevokedBefore(fn func(ctx context.Context, u User) (time.Time, error)) Option {
 	return func(a *Auth) error {
 		if fn == nil {
