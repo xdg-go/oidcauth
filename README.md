@@ -126,6 +126,7 @@ concurrency-safe; caching the cutoff is your job:
 auth, err := oidcauth.NewFromEnv(
 	oidcauth.WithRevokedBefore(
 		func(ctx context.Context, u oidcauth.User) (time.Time, error) {
+			// a store miss returns the zero time, which revokes nothing
 			cutoff, err := store.RevokedAt(ctx, u.Issuer, u.Sub)
 			if err != nil {
 				// outage, not a cutoff: 503 under RequireAuth,
@@ -135,7 +136,6 @@ auth, err := oidcauth.NewFromEnv(
 				// as logged out
 				return time.Time{}, err
 			}
-			// the zero time revokes nothing
 			return cutoff, nil
 		}),
 )

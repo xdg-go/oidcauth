@@ -312,7 +312,7 @@ func (a *Auth) sessionFromRequestAt(r *http.Request, now time.Time) (sessionPayl
 	if !now.Before(a.maxLifetimeDeadline(s)) {
 		return sessionPayload{}, a.rejectCookie(purposeSession, errMaxLifetimeReached)
 	}
-	// The app's revocation cutoff is consulted last, on a session this
+	// The app's revocation lookup is consulted last, on a session this
 	// package has already found intact and unexpired, so the lookup
 	// never sees a user it cannot trust. Rejecting here rather than in
 	// the middleware means the request is indistinguishable from one
@@ -327,30 +327,24 @@ func (a *Auth) sessionFromRequestAt(r *http.Request, now time.Time) (sessionPayl
 		if err != nil {
 			return sessionPayload{}, a.revocationFailed(ctx, err)
 		}
-		// The zero time revokes nothing: a store with no entry for
-		// this user says so by returning it, and gets no comparison.
+		// A store with no entry for this user says so by returning
+		// the zero time, which revokes nothing.
 		if !t.IsZero() {
 			// A cutoff in the future would revoke the session a fresh
 			// login mints as well, looping the browser between this
 			// package and a provider whose own session is still live.
-			// Clamping to now makes that unrepresentable, so a
-			// misconfigured store cannot lock anyone out of this
-			// instance.
-			//
-			// The clamp is against this server's clock, so it says
-			// nothing about skew between instances: a session minted on
-			// a slow instance can still look older than a fast
-			// instance's clamped cutoff, and that instance rejects it
-			// until the skew elapses.
+			// Clamping to now makes that unrepresentable. The clamp is
+			// against this server's clock only; see
+			// [WithRevokedBefore] for what that leaves uncovered.
 			cutoff := t
 			if cutoff.After(now) {
 				cutoff = now
 			}
 			// IssuedAt is whole seconds, and Unix() truncates the
-			// cutoff the same way: otherwise a cutoff set partway
+			// cutoff the same way. Without that, a cutoff set partway
 			// through a second would revoke a session minted later in
-			// that same second, whose issue time truncates back below
-			// it.
+			// that same second: its issue time truncates back below
+			// the cutoff.
 			if s.IssuedAt < cutoff.Unix() {
 				return sessionPayload{}, a.rejectCookie(purposeSession, errSessionRevoked)
 			}

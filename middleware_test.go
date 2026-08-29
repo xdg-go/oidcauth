@@ -1016,7 +1016,7 @@ func serveRequireAuthMethod(a *Auth, c *http.Cookie, method string) *httptest.Re
 	return rr
 }
 
-// TestRevokedBeforeRejectsOldSession is the case the hook exists for:
+// TestRevokedBeforeRejectsOldSession is the case the lookup exists for:
 // the app keeps a per-user cutoff and the library refuses any session
 // issued strictly before it. The rejection must be indistinguishable
 // from an expired cookie, so the response is compared byte for byte
@@ -1081,7 +1081,7 @@ func TestRevokedBeforeSuppressesRenewal(t *testing.T) {
 
 // TestRevokedBeforeAcceptsAndRenews pins the ordinary production case:
 // a user with nothing revoked -- the zero time -- keeps renewal, so
-// configuring the hook costs a session nothing.
+// configuring the lookup costs a session nothing.
 func TestRevokedBeforeAcceptsAndRenews(t *testing.T) {
 	a, c, advance, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
 		return time.Time{}, nil
@@ -1124,10 +1124,10 @@ func TestRevokedBeforeInactiveCutoffRenews(t *testing.T) {
 }
 
 // TestRevokedBeforeNotCalledOnRejectedSession pins the contract that
-// the lookup only ever sees a User this package has already accepted.
-// Some of these cookies never verify at all; an expired or past-max
-// one verifies but is rejected by policy. Either way the app's store
-// is not consulted.
+// the lookup only ever sees a User this package has already verified
+// and cleared. Some of these cookies never verify at all; an expired
+// or past-max one verifies but is refused by policy. Either way the
+// app's store is not consulted.
 func TestRevokedBeforeNotCalledOnRejectedSession(t *testing.T) {
 	valid := func(t *testing.T) (*Auth, *http.Cookie, *int) {
 		t.Helper()
@@ -1146,8 +1146,8 @@ func TestRevokedBeforeNotCalledOnRejectedSession(t *testing.T) {
 	})
 
 	// A well-formed cookie signed by a key this Auth does not know:
-	// it fails only at the signature comparison, so reaching the
-	// lookup would mean the hook runs ahead of the MAC check.
+	// it fails only at the signature comparison, so reaching it
+	// would mean the lookup runs ahead of the MAC check.
 	t.Run("bad signature", func(t *testing.T) {
 		a, _, calls := valid(t)
 		foreign := cookieAuth(testForeignKey)

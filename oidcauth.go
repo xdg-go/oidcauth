@@ -61,20 +61,20 @@
 //
 // # Revoking sessions
 //
-// [WithRevokedBefore] asks the app, on every verified session, for the
-// instant before which that user's sessions are void; a session issued
-// before it is rejected. To log a user out everywhere, store
-// time.Now() for that user when revoking and return it from the
-// lookup. Store now, never the current cookie's issue time: a stolen
-// cookie carries the same issue time as the user's own (see "Session
-// lifetime" above), so a cutoff there would spare the attacker along
-// with the user. The lookup still runs once per authenticated request,
-// so caching the cutoff is the app's job.
+// [WithRevokedBefore] asks the app, on every verified session, for
+// that user's revocation cutoff: the instant before which their
+// sessions are void. A session issued before the cutoff is rejected.
+// To log a user out everywhere, store time.Now() for that user when
+// revoking and return it from the lookup.
 //
-// Issue time and cutoff are compared in whole seconds, so revocation
-// bites from the next whole second and a session minted later in the
-// cutoff's own second survives. An app that needs it to bite
-// immediately stores time.Now().Truncate(time.Second).Add(time.Second).
+// Store now, never the current cookie's issue time. A stolen cookie
+// carries the same issue time as the user's own (see "Session
+// lifetime" above), so a cutoff set there would spare the attacker
+// along with the user.
+//
+// The lookup runs once per authenticated request, so caching the
+// cutoff is the app's job. Revocation takes effect within a second
+// of the stored time.
 //
 // This package does not recover from a panicking lookup. What the
 // client sees is whatever the app's own recovery middleware does; with
@@ -382,22 +382,27 @@ func WithSessionMaxLifetime(d time.Duration) Option {
 // so a store miss needs no app-side branch. A non-zero time rejects a
 // session issued before it, exactly as an expired cookie is rejected:
 // same response, and no renewed cookie. A non-nil error reports that
-// the lookup could not answer, which is an operational failure rather
-// than an authorization decision: [Auth.RequireAuth] answers 503, bare
+// the lookup could not answer. That is an operational failure, not an
+// authorization decision: [Auth.RequireAuth] answers 503, bare
 // [Auth.Authenticate] treats the request as anonymous, and nothing is
-// renewed. A failure is logged at warn, or at debug when the request
+// renewed. The failure is logged at warn, or at debug when the request
 // context is already done, because a client that went away is
 // ordinary traffic.
 //
 // A non-zero time returned alongside a non-nil error is ignored: the
 // error wins, and the lookup counts as a failure.
 //
-// A cutoff in the future is treated as now on the instance serving the
-// request, so a misconfigured store cannot revoke the session a fresh
-// login is about to mint and lock the user out there. That clamp is
-// against one server's clock and does not cover skew between
-// instances: a session minted on a slow instance can still be rejected
-// by a faster one until the skew elapses.
+// A cutoff in the future is clamped to now on the instance serving
+// the request. A misconfigured store therefore cannot revoke the
+// session a fresh login is about to mint, which would lock the user
+// out of that instance. The clamp is against one server's clock, so
+// it says nothing about skew between instances: a session minted on a
+// slow instance can still be rejected by a faster one until the skew
+// elapses.
+//
+// There is no fail-open switch. An app that would rather let requests
+// through during its own store outage returns the zero time from its
+// error path; one that would rather shut them out returns the error.
 //
 // Treat the User as read-only. Its Extra map is the same map handlers
 // read from the request context, shared rather than copied, so writing
