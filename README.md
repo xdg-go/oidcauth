@@ -115,37 +115,35 @@ sooner, see [Revoke a session](#revoke-a-session) below and
 
 ### Revoke a session
 
-`WithSessionValidator` runs your check on every verified session,
-after the signature, expiry, and max lifetime pass. Store a revocation
-epoch per user and reject sessions issued before it. The validator
+`WithRevokedBefore` asks you, on every verified session, for the
+instant before which that user's sessions are void; the library
+rejects any session issued before it. To log a user out everywhere,
+store `time.Now()` for them when revoking and return it. The lookup
 runs on every authenticated request, so keep it fast and
-concurrency-safe; cache the epoch rather than hitting the store each
-time:
+concurrency-safe; caching the cutoff is your job:
 
 ```go
 auth, err := oidcauth.NewFromEnv(
-	oidcauth.WithSessionValidator(
-		func(ctx context.Context, u oidcauth.User, issuedAt time.Time) (bool, error) {
-			epoch, err := store.RevokedAt(ctx, u.Issuer, u.Sub)
+	oidcauth.WithRevokedBefore(
+		func(ctx context.Context, u oidcauth.User) (time.Time, error) {
+			cutoff, err := store.RevokedAt(ctx, u.Issuer, u.Sub)
 			if err != nil {
-				// outage, not a verdict: 503 under RequireAuth,
+				// outage, not a cutoff: 503 under RequireAuth,
 				// never a renewal; under Authenticate the request
 				// looks anonymous, so check
 				// SessionUnavailableFromContext before treating it
 				// as logged out
-				return false, err
+				return time.Time{}, err
 			}
-			return !issuedAt.Before(epoch.Truncate(time.Second)), nil
+			// the zero time revokes nothing
+			return cutoff, nil
 		}),
 )
 ```
 
-To log a user out everywhere, set their epoch to now, never to the
-current cookie's issue time. Truncate the epoch to a whole second, as
-the example does, because `issuedAt` is whole-second. Judge by issue
-time rather than by identity: the validator does not run at the
-callback, so a rule that rejects on identity alone loops between your
-app and the provider. For the reasoning behind all three, see
+Store the revocation instant, never the current cookie's issue time: a
+stolen cookie carries the same issue time as the user's own. For the
+reasoning, see
 [Revoking sessions](https://pkg.go.dev/github.com/xdg-go/oidcauth#hdr-Revoking_sessions).
 
 ### Ask for consent once per new user

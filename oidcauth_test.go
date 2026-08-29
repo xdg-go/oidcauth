@@ -17,8 +17,8 @@ import (
 func TestOptionSettersApply(t *testing.T) {
 	known := func(string, string) bool { return true }
 	a := &Auth{}
-	if a.sessionValidator != nil {
-		t.Fatal("sessionValidator set before any option ran")
+	if a.revokedBefore != nil {
+		t.Fatal("revokedBefore set before any option ran")
 	}
 	opts := []Option{
 		WithSessionLifetime(2 * time.Hour),
@@ -31,7 +31,7 @@ func TestOptionSettersApply(t *testing.T) {
 		ForceApprovalIfNewUser(known),
 		WithForceConsentParams(map[string]string{"prompt": "consent"}),
 		WithExtraClaims("groups", "roles"),
-		WithSessionValidator(func(context.Context, User, time.Time) (bool, error) { return true, nil }),
+		WithRevokedBefore(func(context.Context, User) (time.Time, error) { return time.Time{}, nil }),
 	}
 	for _, opt := range opts {
 		if err := opt(a); err != nil {
@@ -69,8 +69,8 @@ func TestOptionSettersApply(t *testing.T) {
 	if !reflect.DeepEqual(a.extraClaims, []string{"groups", "roles"}) {
 		t.Errorf("extraClaims = %v, want [groups roles]", a.extraClaims)
 	}
-	if a.sessionValidator == nil {
-		t.Errorf("sessionValidator not set")
+	if a.revokedBefore == nil {
+		t.Errorf("revokedBefore not set")
 	}
 }
 
@@ -120,7 +120,7 @@ func TestOptionValidation(t *testing.T) {
 		"relative logout path":        WithLogoutPath("out"),
 		"relative post-logout":        WithPostLogoutRedirect("bye"),
 		"nil known func":              ForceApprovalIfNewUser(nil),
-		"nil session validator":       WithSessionValidator(nil),
+		"nil revocation lookup":       WithRevokedBefore(nil),
 		"empty consent params":        WithForceConsentParams(nil),
 		"no extra claim names":        WithExtraClaims(),
 	}

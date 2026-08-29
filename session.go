@@ -53,7 +53,7 @@ var (
 	errExpired            = fmt.Errorf("%w: expired", errBadCookie)
 	errNoIssuedAt         = fmt.Errorf("%w: no issue time", errBadCookie)
 	errMaxLifetimeReached = fmt.Errorf("%w: max lifetime reached", errBadCookie)
-	errValidatorRejected  = fmt.Errorf("%w: rejected by session validator", errBadCookie)
+	errSessionRevoked     = fmt.Errorf("%w: revoked", errBadCookie)
 
 	// errCorruptPayload is the highest-signal reason: the payload
 	// carried a valid MAC yet did not decode. Nothing an outsider can
@@ -64,13 +64,13 @@ var (
 	errCorruptPayload = fmt.Errorf("%w: corrupt payload", errBadCookie)
 )
 
-// errValidatorFailed reports that the session validator could not
-// reach a verdict -- a lookup timed out, the revocation store was
-// down. It deliberately does NOT wrap errBadCookie: the cookie may be
-// perfectly good, and an operational failure must not be reported to
-// the caller as an authorization decision. The middlewares answer it
-// differently from every errBadCookie reason.
-var errValidatorFailed = errors.New("oidcauth: session validator failed")
+// errRevocationFailed reports that the app's revocation lookup could
+// not answer -- it timed out, the revocation store was down. It
+// deliberately does NOT wrap errBadCookie: the cookie may be perfectly
+// good, and an operational failure must not be reported to the caller
+// as an authorization decision. The middlewares answer it differently
+// from every errBadCookie reason.
+var errRevocationFailed = errors.New("oidcauth: revocation lookup failed")
 
 // rejectCookie logs why a signed cookie was rejected and returns the
 // reason unchanged. The log names the failure class only -- never a
@@ -84,27 +84,27 @@ func (a *Auth) rejectCookie(purpose string, err error) error {
 	return err
 }
 
-// validatorFailed logs a session validator failure and wraps its
+// revocationFailed logs a revocation-lookup failure and wraps its
 // error. It is warn, not the debug used for cookie rejections: a
-// rejected cookie is routine traffic, while a validator that cannot
+// rejected cookie is routine traffic, while a lookup that cannot
 // answer is an outage in a dependency the operator needs to see.
 //
 // The level follows the request context's state, not the error's
 // identity. When ctx is already done the client has gone away, so a
-// validator honoring cancellation reports an error on every aborted
+// lookup honoring cancellation reports an error on every aborted
 // request: ordinary traffic that an authenticated client could
 // otherwise flood the warn level with on purpose. Those drop to debug.
 // An error that merely wraps context.Canceled or DeadlineExceeded
 // while the request is still live is a dependency timeout, not a
 // departed client. That is a real outage, so it stays at warn. Only
-// the level changes: the caller still sees errValidatorFailed.
-func (a *Auth) validatorFailed(ctx context.Context, err error) error {
+// the level changes: the caller still sees errRevocationFailed.
+func (a *Auth) revocationFailed(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
-		a.logger.Debug("oidcauth: session validator canceled", "reason", err.Error())
+		a.logger.Debug("oidcauth: revocation lookup canceled", "reason", err.Error())
 	} else {
-		a.logger.Warn("oidcauth: session validator failed", "reason", err.Error())
+		a.logger.Warn("oidcauth: revocation lookup failed", "reason", err.Error())
 	}
-	return fmt.Errorf("%w: %w", errValidatorFailed, err)
+	return fmt.Errorf("%w: %w", errRevocationFailed, err)
 }
 
 // sessionPayload is the signed content of the app session cookie.
@@ -312,23 +312,48 @@ func (a *Auth) sessionFromRequestAt(r *http.Request, now time.Time) (sessionPayl
 	if !now.Before(a.maxLifetimeDeadline(s)) {
 		return sessionPayload{}, a.rejectCookie(purposeSession, errMaxLifetimeReached)
 	}
-	// The app's own check runs last, on a session this package has
-	// already found intact and unexpired, so a validator never sees a
-	// user or issue time it cannot trust. Rejecting here rather than
-	// in the middleware means the request is indistinguishable from
-	// one carrying an expired cookie: same response, and no renewal,
+	// The app's revocation cutoff is consulted last, on a session this
+	// package has already found intact and unexpired, so the lookup
+	// never sees a user it cannot trust. Rejecting here rather than in
+	// the middleware means the request is indistinguishable from one
+	// carrying an expired cookie: same response, and no renewal,
 	// because renewal only ever runs on a session that verified. A
-	// validator that cannot answer is a separate outcome: it returns
-	// errValidatorFailed, which the middlewares must not disguise as
+	// lookup that cannot answer is a separate outcome: it returns
+	// errRevocationFailed, which the middlewares must not disguise as
 	// an expired session.
-	if a.sessionValidator != nil {
+	if a.revokedBefore != nil {
 		ctx := r.Context()
-		ok, err := a.sessionValidator(ctx, s.User, time.Unix(s.IssuedAt, 0).UTC())
+		t, err := a.revokedBefore(ctx, s.User)
 		if err != nil {
-			return sessionPayload{}, a.validatorFailed(ctx, err)
+			return sessionPayload{}, a.revocationFailed(ctx, err)
 		}
-		if !ok {
-			return sessionPayload{}, a.rejectCookie(purposeSession, errValidatorRejected)
+		// The zero time revokes nothing: a store with no entry for
+		// this user says so by returning it, and gets no comparison.
+		if !t.IsZero() {
+			// A cutoff in the future would revoke the session a fresh
+			// login mints as well, looping the browser between this
+			// package and a provider whose own session is still live.
+			// Clamping to now makes that unrepresentable, so a
+			// misconfigured store cannot lock anyone out of this
+			// instance.
+			//
+			// The clamp is against this server's clock, so it says
+			// nothing about skew between instances: a session minted on
+			// a slow instance can still look older than a fast
+			// instance's clamped cutoff, and that instance rejects it
+			// until the skew elapses.
+			cutoff := t
+			if cutoff.After(now) {
+				cutoff = now
+			}
+			// IssuedAt is whole seconds, and Unix() truncates the
+			// cutoff the same way: otherwise a cutoff set partway
+			// through a second would revoke a session minted later in
+			// that same second, whose issue time truncates back below
+			// it.
+			if s.IssuedAt < cutoff.Unix() {
+				return sessionPayload{}, a.rejectCookie(purposeSession, errSessionRevoked)
+			}
 		}
 	}
 	return s, nil

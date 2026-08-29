@@ -472,17 +472,17 @@ func TestSessionIssuedAtTamperDetected(t *testing.T) {
 // sentinels a single external behavior: whatever fails, callers see
 // errBadCookie.
 func TestCookieRejectionReasonsWrapErrBadCookie(t *testing.T) {
-	for _, err := range []error{errNoCookie, errBadSignature, errMalformedPayload, errCorruptPayload, errExpired, errNoIssuedAt} {
+	for _, err := range []error{errNoCookie, errBadSignature, errMalformedPayload, errCorruptPayload, errExpired, errNoIssuedAt, errMaxLifetimeReached, errSessionRevoked} {
 		if !errors.Is(err, errBadCookie) {
 			t.Errorf("%v does not wrap errBadCookie", err)
 		}
 	}
-	// The deliberate exception: an inconclusive validator is an
-	// operational failure, not a cookie rejection, and folding it into
-	// the block above "for consistency" would make the middlewares
-	// disguise an outage as an expired session.
-	if errors.Is(errValidatorFailed, errBadCookie) {
-		t.Error("errValidatorFailed wraps errBadCookie")
+	// The deliberate exception: an inconclusive revocation lookup is
+	// an operational failure, not a cookie rejection, and folding it
+	// into the block above "for consistency" would make the
+	// middlewares disguise an outage as an expired session.
+	if errors.Is(errRevocationFailed, errBadCookie) {
+		t.Error("errRevocationFailed wraps errBadCookie")
 	}
 }
 

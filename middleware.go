@@ -33,8 +33,8 @@ type authResult struct {
 	// when ok is true.
 	session sessionPayload
 	ok      bool
-	// failed reports that the session validator could not reach a
-	// verdict. It is a third outcome, not a flavor of !ok: an outage
+	// failed reports that the app's revocation lookup could not
+	// answer. It is a third outcome, not a flavor of !ok: an outage
 	// in the app's revocation store is an operational failure, so
 	// [Auth.RequireAuth] answers it with 503 instead of the redirect
 	// or 401 an expired cookie earns.
@@ -125,7 +125,7 @@ func (a *Auth) verifyOnce(w http.ResponseWriter, r *http.Request) (authResult, *
 	// expires.
 	now := a.now()
 	s, err := a.sessionFromRequestAt(r, now)
-	res := authResult{owner: a, session: s, ok: err == nil, failed: errors.Is(err, errValidatorFailed), at: now}
+	res := authResult{owner: a, session: s, ok: err == nil, failed: errors.Is(err, errRevocationFailed), at: now}
 	if res.ok || res.failed {
 		// The response may depend on who is logged in, so a shared
 		// cache must not serve it to another user. Anonymous requests
@@ -142,8 +142,8 @@ func (a *Auth) verifyOnce(w http.ResponseWriter, r *http.Request) (authResult, *
 // The verified [User] is placed in the request context for
 // [UserFromContext]. Unauthenticated GET/HEAD requests are redirected
 // to the login handler with `next` set to the requested path; other
-// methods get 401. A session validator that reports failure rather
-// than a verdict (see [WithSessionValidator]) gets 503: an outage is
+// methods get 401. A revocation lookup that reports failure rather
+// than a cutoff (see [WithRevokedBefore]) gets 503: an outage is
 // not an authentication failure, and a login redirect could not fix
 // it.
 //
@@ -194,7 +194,7 @@ func UserFromContext(ctx context.Context) (u User, ok bool) {
 
 // SessionUnavailableFromContext reports whether session verification
 // failed operationally for this request -- the app's own
-// [WithSessionValidator] returned an error rather than a verdict. It
+// [WithRevokedBefore] returned an error rather than a cutoff. It
 // is the third outcome behind a false ok from [UserFromContext], which
 // alone cannot tell an anonymous request from one whose session could
 // not be checked. An app with its own gate uses it to answer 503
@@ -210,7 +210,7 @@ func UserFromContext(ctx context.Context) (u User, ok bool) {
 //	}
 //
 // It is false when no middleware of this package ran, and false for a
-// session the validator merely rejected: that is an authorization
+// session the cutoff merely revoked: that is an authorization
 // decision, and the client is told nothing about it.
 func SessionUnavailableFromContext(ctx context.Context) bool {
 	res, ok := ctx.Value(ctxKey{}).(authResult)

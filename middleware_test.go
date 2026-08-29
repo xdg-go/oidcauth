@@ -978,19 +978,20 @@ func TestNoRenewalWithoutValidSession(t *testing.T) {
 	}
 }
 
-// validatorFixture is renewalFixture plus an app-supplied session
-// validator, recording every call so a test can assert the validator
-// never saw a request the library should have rejected on its own.
-func validatorFixture(t *testing.T, fn func(ctx context.Context, u User, issuedAt time.Time) (bool, error)) (a *Auth, c *http.Cookie, advance func(time.Duration), calls *int) {
+// revokedBeforeFixture is renewalFixture plus an app-supplied
+// revocation cutoff lookup, recording every call so a test can assert
+// the lookup never saw a request the library should have rejected on
+// its own.
+func revokedBeforeFixture(t *testing.T, fn func(ctx context.Context, u User) (time.Time, error)) (a *Auth, c *http.Cookie, advance func(time.Duration), calls *int) {
 	t.Helper()
 	a, c, advance = renewalFixture(t)
 	calls = new(int)
-	wrapped := func(ctx context.Context, u User, issuedAt time.Time) (bool, error) {
+	wrapped := func(ctx context.Context, u User) (time.Time, error) {
 		*calls++
-		return fn(ctx, u, issuedAt)
+		return fn(ctx, u)
 	}
-	if err := WithSessionValidator(wrapped)(a); err != nil {
-		t.Fatalf("WithSessionValidator: %v", err)
+	if err := WithRevokedBefore(wrapped)(a); err != nil {
+		t.Fatalf("WithRevokedBefore: %v", err)
 	}
 	return a, c, advance, calls
 }
@@ -1015,28 +1016,26 @@ func serveRequireAuthMethod(a *Auth, c *http.Cookie, method string) *httptest.Re
 	return rr
 }
 
-// TestSessionValidatorRejectsOldIssueTime is the revocation case the
-// hook exists for: the app keeps a per-user epoch and refuses any
-// session issued strictly before it. The rejection must be
-// indistinguishable from an expired cookie, so the response is
-// compared byte for byte against the same request made past the
-// session lifetime.
-func TestSessionValidatorRejectsOldIssueTime(t *testing.T) {
+// TestRevokedBeforeRejectsOldSession is the case the hook exists for:
+// the app keeps a per-user cutoff and the library refuses any session
+// issued strictly before it. The rejection must be indistinguishable
+// from an expired cookie, so the response is compared byte for byte
+// against the same request made past the session lifetime.
+func TestRevokedBeforeRejectsOldSession(t *testing.T) {
 	var gotSub string
-	a, c, advance, calls := validatorFixture(t, func(_ context.Context, u User, issuedAt time.Time) (bool, error) {
+	a, c, advance, calls := revokedBeforeFixture(t, func(_ context.Context, u User) (time.Time, error) {
 		gotSub = u.Sub
-		// Epoch one minute after the cookie was minted.
-		epoch := time.Date(2026, 8, 21, 0, 1, 0, 0, time.UTC)
-		return !issuedAt.Before(epoch), nil
+		// Cutoff one minute after the cookie was minted.
+		return time.Date(2026, 8, 21, 0, 1, 0, 0, time.UTC), nil
 	})
 	advance(5 * time.Minute)
 	got := serveRequireAuth(a, c)
 	if *calls != 1 {
-		t.Errorf("validator calls = %d, want 1", *calls)
+		t.Errorf("revocation lookups = %d, want 1", *calls)
 	}
-	// The validator judges a real identity, not a zero value.
+	// The lookup is handed a real identity, not a zero value.
 	if gotSub != "s1" {
-		t.Errorf("validator saw Sub = %q, want %q", gotSub, "s1")
+		t.Errorf("lookup saw Sub = %q, want %q", gotSub, "s1")
 	}
 
 	// Same request, same cookie, but past the session lifetime: the
@@ -1056,52 +1055,85 @@ func TestSessionValidatorRejectsOldIssueTime(t *testing.T) {
 	}
 }
 
-// TestSessionValidatorSuppressesRenewal covers the other half of
-// "rejected exactly as expired": a session the validator refuses must
-// not be handed a fresh cookie, even though its clock puts it well
-// inside the renew window.
-func TestSessionValidatorSuppressesRenewal(t *testing.T) {
-	a, c, advance, calls := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) { return false, nil })
-	advance(31 * time.Minute) // renew window opens at +30m
+// TestRevokedBeforeSuppressesRenewal covers the other half of
+// "rejected exactly as expired": a revoked session must not be handed
+// a fresh cookie, even though its clock puts it well inside the renew
+// window.
+func TestRevokedBeforeSuppressesRenewal(t *testing.T) {
+	var cutoff time.Time
+	a, c, advance, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+		return cutoff, nil
+	})
+	cutoff = a.now().Add(time.Second) // one second after the mint
+	advance(31 * time.Minute)         // renew window opens at +30m
 
 	rr, ok := serveAuthenticated(a, c, nil)
 	if *ok {
-		t.Error("rejected session seen as logged in")
+		t.Error("revoked session seen as logged in")
 	}
 	if *calls != 1 {
-		t.Errorf("validator calls = %d, want 1", *calls)
+		t.Errorf("revocation lookups = %d, want 1", *calls)
 	}
 	if got := sessionSetCookies(rr, a.sessionName()); len(got) != 0 {
-		t.Errorf("renewed a session the validator rejected: %q", got)
+		t.Errorf("renewed a revoked session: %q", got)
 	}
 }
 
-// TestSessionValidatorAcceptsAndRenews pins the ordinary production
-// case: a configured validator that accepts leaves renewal alone, so
-// an accepting hook costs a session nothing.
-func TestSessionValidatorAcceptsAndRenews(t *testing.T) {
-	a, c, advance, calls := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) { return true, nil })
+// TestRevokedBeforeAcceptsAndRenews pins the ordinary production case:
+// a user with nothing revoked -- the zero time -- keeps renewal, so
+// configuring the hook costs a session nothing.
+func TestRevokedBeforeAcceptsAndRenews(t *testing.T) {
+	a, c, advance, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+		return time.Time{}, nil
+	})
 	advance(31 * time.Minute) // renew window opens at +30m
 
 	rr, ok := serveAuthenticated(a, c, nil)
 	if !*ok {
-		t.Error("accepted session seen as logged out")
+		t.Error("session with no revocation cutoff seen as logged out")
 	}
 	if *calls != 1 {
-		t.Errorf("validator calls = %d, want 1", *calls)
+		t.Errorf("revocation lookups = %d, want 1", *calls)
 	}
 	if sessionCookieOrNil(rr, a.sessionName()) == nil {
-		t.Error("no renewal with an accepting validator set")
+		t.Error("no renewal with a revocation lookup set")
 	}
 }
 
-// TestSessionValidatorNotCalledOnUnverifiedCookie pins the contract
-// that the validator only ever sees a User and issue time this package
-// has already authenticated.
-func TestSessionValidatorNotCalledOnUnverifiedCookie(t *testing.T) {
+// TestRevokedBeforeInactiveCutoffRenews covers the second accepting
+// case: a real cutoff that predates the session leaves renewal alone,
+// so a past revocation costs the user's current session nothing.
+func TestRevokedBeforeInactiveCutoffRenews(t *testing.T) {
+	var cutoff time.Time
+	a, c, advance, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+		return cutoff, nil
+	})
+	cutoff = a.now().Add(-time.Hour) // an hour before the mint
+	advance(31 * time.Minute)        // renew window opens at +30m
+
+	rr, ok := serveAuthenticated(a, c, nil)
+	if !*ok {
+		t.Error("session minted after the cutoff seen as logged out")
+	}
+	if *calls != 1 {
+		t.Errorf("revocation lookups = %d, want 1", *calls)
+	}
+	if sessionCookieOrNil(rr, a.sessionName()) == nil {
+		t.Error("no renewal for a session the cutoff does not revoke")
+	}
+}
+
+// TestRevokedBeforeNotCalledOnRejectedSession pins the contract that
+// the lookup only ever sees a User this package has already accepted.
+// Some of these cookies never verify at all; an expired or past-max
+// one verifies but is rejected by policy. Either way the app's store
+// is not consulted.
+func TestRevokedBeforeNotCalledOnRejectedSession(t *testing.T) {
 	valid := func(t *testing.T) (*Auth, *http.Cookie, *int) {
 		t.Helper()
-		a, c, _, calls := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) { return true, nil })
+		a, c, _, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+			return time.Time{}, nil
+		})
 		return a, c, calls
 	}
 
@@ -1109,13 +1141,13 @@ func TestSessionValidatorNotCalledOnUnverifiedCookie(t *testing.T) {
 		a, _, calls := valid(t)
 		serveRequireAuth(a, nil)
 		if *calls != 0 {
-			t.Errorf("validator calls = %d, want 0", *calls)
+			t.Errorf("revocation lookups = %d, want 0", *calls)
 		}
 	})
 
 	// A well-formed cookie signed by a key this Auth does not know:
 	// it fails only at the signature comparison, so reaching the
-	// validator would mean the hook runs ahead of the MAC check.
+	// lookup would mean the hook runs ahead of the MAC check.
 	t.Run("bad signature", func(t *testing.T) {
 		a, _, calls := valid(t)
 		foreign := cookieAuth(testForeignKey)
@@ -1124,33 +1156,143 @@ func TestSessionValidatorNotCalledOnUnverifiedCookie(t *testing.T) {
 		foreign.setSessionCookie(rr, User{Sub: "s1"})
 		serveRequireAuth(a, recordedCookie(t, rr, foreign.sessionName()))
 		if *calls != 0 {
-			t.Errorf("validator calls = %d, want 0", *calls)
+			t.Errorf("revocation lookups = %d, want 0", *calls)
+		}
+	})
+
+	t.Run("garbage value", func(t *testing.T) {
+		a, _, calls := valid(t)
+		serveRequireAuth(a, &http.Cookie{Name: a.sessionName(), Value: "not-a-signed-cookie"})
+		if *calls != 0 {
+			t.Errorf("revocation lookups = %d, want 0", *calls)
+		}
+	})
+
+	// The two rejections the library decides on its own, from a
+	// payload it did sign: reaching the lookup for either would mean
+	// the app's store is consulted about sessions this package has
+	// already refused.
+	t.Run("expired", func(t *testing.T) {
+		a, c, advance, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+			return time.Time{}, nil
+		})
+		advance(a.sessionLifetime + time.Minute)
+		serveRequireAuth(a, c)
+		if *calls != 0 {
+			t.Errorf("revocation lookups = %d, want 0", *calls)
+		}
+	})
+
+	t.Run("past max lifetime", func(t *testing.T) {
+		a, _, _, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+			return time.Time{}, nil
+		})
+		now := a.now()
+		// Unexpired on its own lifetime, so only the max-lifetime
+		// check can reject it.
+		payload, err := json.Marshal(sessionPayload{
+			User:     User{Sub: "s1"},
+			Expiry:   now.Add(time.Minute),
+			IssuedAt: now.Add(-a.maxSessionLifetime - time.Second).Unix(),
+		})
+		if err != nil {
+			t.Fatalf("marshal past-max-lifetime payload: %v", err)
+		}
+		serveRequireAuth(a, signedSession(a, payload))
+		if *calls != 0 {
+			t.Errorf("revocation lookups = %d, want 0", *calls)
 		}
 	})
 }
 
-// TestSessionValidatorEpochBoundary pins the comparison the doc
-// comment on WithSessionValidator prescribes. An epoch equal to a live
-// session's IssuedAt leaves it alone -- which is why "log out
-// everywhere" must set the epoch to now, not to the current cookie's
-// issue time, since a stolen clone carries that same timestamp.
-func TestSessionValidatorEpochBoundary(t *testing.T) {
+// TestRevokedBeforeFutureCutoffClamped pins the clamp: a store that
+// hands back a cutoff in the future must not revoke a session minted
+// now, or the browser would loop between a fresh login here and a
+// provider whose own session is still live. Unclamped, this cookie's
+// issue time sits an hour below the cutoff and would be refused.
+func TestRevokedBeforeFutureCutoffClamped(t *testing.T) {
+	var cutoff time.Time
+	a, c, _, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+		return cutoff, nil
+	})
+	cutoff = a.now().Add(time.Hour) // the clock has not moved: the cookie was minted at now
+
+	if _, ok := serveAuthenticated(a, c, nil); !*ok {
+		t.Error("session minted at now was revoked by a future cutoff")
+	}
+	if *calls != 1 {
+		t.Errorf("revocation lookups = %d, want 1", *calls)
+	}
+}
+
+// TestRevokedBeforeReloginEndsLoop pins the invariant the whole design
+// rests on: whatever cutoff revoked a session, logging back in ends
+// it. The same lookup answers both requests, so a cutoff that could
+// outlive a fresh mint would show up here as a second rejection.
+func TestRevokedBeforeReloginEndsLoop(t *testing.T) {
 	cases := []struct {
-		name       string
-		epochAfter time.Duration // epoch relative to the session's IssuedAt
-		wantValid  bool
+		name        string
+		cutoffAfter time.Duration // cutoff relative to the re-login instant
 	}{
-		{"epoch equals IssuedAt", 0, true},
-		{"epoch is now", 5 * time.Minute, false},
+		{"cutoff is now", 0},
+		{"cutoff in the future", time.Hour}, // clamped back to now
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var epoch time.Time
-			a, c, advance, calls := validatorFixture(t, func(_ context.Context, _ User, issuedAt time.Time) (bool, error) {
-				return !issuedAt.Before(epoch), nil
+			var cutoff time.Time
+			a, old, advance, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+				return cutoff, nil
 			})
-			mintedAt := a.now()
-			epoch = mintedAt.Add(tc.epochAfter)
+			advance(5 * time.Minute)
+			cutoff = a.now().Add(tc.cutoffAfter)
+
+			if _, ok := serveAuthenticated(a, old, nil); *ok {
+				t.Fatal("session issued before the cutoff was accepted")
+			}
+
+			// The login handler mints a new cookie at the same instant
+			// the cutoff was read from.
+			rr := httptest.NewRecorder()
+			a.setSessionCookie(rr, User{Sub: "s1"})
+			fresh := recordedCookie(t, rr, a.sessionName())
+
+			if _, ok := serveAuthenticated(a, fresh, nil); !*ok {
+				t.Error("session minted after the cutoff was revoked: login loops")
+			}
+			if *calls != 2 {
+				t.Errorf("revocation lookups = %d, want 2", *calls)
+			}
+		})
+	}
+}
+
+// TestRevokedBeforeCutoffBoundary pins the comparison the library now
+// owns, at the one-second granularity IssuedAt is stored in. A cutoff
+// equal to a live session's issue time leaves it alone -- which is why
+// "log out everywhere" must store now, not the current cookie's issue
+// time, since a stolen clone carries that same timestamp. One second
+// later is the first cutoff that revokes it.
+//
+// The shape of that rejection is pinned next door:
+// [TestRevokedBeforeRejectsOldSession] compares it byte for byte
+// against an expired cookie's response, and
+// [TestRevokedBeforeSuppressesRenewal] shows it is not renewed.
+func TestRevokedBeforeCutoffBoundary(t *testing.T) {
+	cases := []struct {
+		name        string
+		cutoffAfter time.Duration // cutoff relative to the session's issue time
+		wantValid   bool
+	}{
+		{"cutoff equals issue time", 0, true},
+		{"cutoff one second later", time.Second, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var cutoff time.Time
+			a, c, advance, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+				return cutoff, nil
+			})
+			cutoff = a.now().Add(tc.cutoffAfter)
 			advance(5 * time.Minute) // the session is live either way
 
 			_, ok := serveAuthenticated(a, c, nil)
@@ -1158,30 +1300,30 @@ func TestSessionValidatorEpochBoundary(t *testing.T) {
 				t.Errorf("session valid = %v, want %v", *ok, tc.wantValid)
 			}
 			if *calls != 1 {
-				t.Errorf("validator calls = %d, want 1", *calls)
+				t.Errorf("revocation lookups = %d, want 1", *calls)
 			}
 		})
 	}
 }
 
-// TestSessionValidatorSubSecondEpoch pins the truncation the
-// WithSessionValidator doc prescribes: an epoch set partway through a
-// second must not revoke a session minted later in that same second,
-// whose issuedAt truncates back to the top of it.
-func TestSessionValidatorSubSecondEpoch(t *testing.T) {
+// TestRevokedBeforeSubSecondCutoff pins the truncation rule the
+// library owns: comparing Unix seconds truncates the cutoff to the
+// same whole seconds IssuedAt carries, so a cutoff set partway through
+// a second must not revoke a session minted later in that same second.
+func TestRevokedBeforeSubSecondCutoff(t *testing.T) {
 	a := authWithLoginPath()
 	base := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
-	epoch := base.Add(200 * time.Millisecond) // "log out everywhere" fires
-	now := base.Add(900 * time.Millisecond)   // user logs back in
+	cutoff := base.Add(200 * time.Millisecond) // "log out everywhere" fires
+	now := base.Add(900 * time.Millisecond)    // user logs back in
 	a.now = func() time.Time { return now }
 
 	calls := 0
-	err := WithSessionValidator(func(_ context.Context, _ User, issuedAt time.Time) (bool, error) {
+	err := WithRevokedBefore(func(context.Context, User) (time.Time, error) {
 		calls++
-		return !issuedAt.Before(epoch.Truncate(time.Second)), nil
+		return cutoff, nil
 	})(a)
 	if err != nil {
-		t.Fatalf("WithSessionValidator: %v", err)
+		t.Fatalf("WithRevokedBefore: %v", err)
 	}
 
 	rr := httptest.NewRecorder()
@@ -1189,26 +1331,26 @@ func TestSessionValidatorSubSecondEpoch(t *testing.T) {
 	c := recordedCookie(t, rr, a.sessionName())
 
 	if _, ok := serveAuthenticated(a, c, nil); !*ok {
-		t.Error("session minted after the epoch was revoked by it")
+		t.Error("session minted after the cutoff was revoked by it")
 	}
 	if calls != 1 {
-		t.Errorf("validator calls = %d, want 1", calls)
+		t.Errorf("revocation lookups = %d, want 1", calls)
 	}
 }
 
-// TestSessionValidatorErrorRequireAuth pins the third outcome: a
-// validator that cannot reach a verdict is an outage, not an
-// authorization decision, so RequireAuth must answer 5xx rather than
-// the login redirect an expired cookie earns.
-func TestSessionValidatorErrorRequireAuth(t *testing.T) {
-	a, c, advance, calls := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) {
-		return false, errors.New("revocation store down")
+// TestRevokedBeforeErrorRequireAuth pins the third outcome: a lookup
+// that cannot answer is an outage, not an authorization decision, so
+// RequireAuth must answer 5xx rather than the login redirect an
+// expired cookie earns.
+func TestRevokedBeforeErrorRequireAuth(t *testing.T) {
+	a, c, advance, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+		return time.Time{}, errors.New("revocation store down")
 	})
 	advance(5 * time.Minute)
 
 	got := serveRequireAuth(a, c)
 	if *calls != 1 {
-		t.Errorf("validator calls = %d, want 1", *calls)
+		t.Errorf("revocation lookups = %d, want 1", *calls)
 	}
 	if got.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want %d", got.Code, http.StatusServiceUnavailable)
@@ -1219,16 +1361,16 @@ func TestSessionValidatorErrorRequireAuth(t *testing.T) {
 	b, bc, badvance := renewalFixture(t)
 	badvance(b.sessionLifetime + time.Minute)
 	if expired := serveRequireAuth(b, bc); got.Code == expired.Code {
-		t.Errorf("validator failure answered with the expired-session status %d", expired.Code)
+		t.Errorf("revocation failure answered with the expired-session status %d", expired.Code)
 	}
 }
 
-// TestSessionValidatorErrorAuthenticateIsAnonymous pins the other
-// half: a public page must not go down because the app's revocation
-// store did. The handler still runs, seeing an anonymous request.
-func TestSessionValidatorErrorAuthenticateIsAnonymous(t *testing.T) {
-	a, c, advance, calls := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) {
-		return false, errors.New("revocation store down")
+// TestRevokedBeforeErrorAuthenticateIsAnonymous pins the other half: a
+// public page must not go down because the app's revocation store did.
+// The handler still runs, seeing an anonymous request.
+func TestRevokedBeforeErrorAuthenticateIsAnonymous(t *testing.T) {
+	a, c, advance, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+		return time.Time{}, errors.New("revocation store down")
 	})
 	advance(5 * time.Minute)
 
@@ -1241,54 +1383,54 @@ func TestSessionValidatorErrorAuthenticateIsAnonymous(t *testing.T) {
 		t.Error("handler did not run")
 	}
 	if *ok {
-		t.Error("request seen as logged in despite a failed validator")
+		t.Error("request seen as logged in despite a failed revocation lookup")
 	}
 	if *calls != 1 {
-		t.Errorf("validator calls = %d, want 1", *calls)
+		t.Errorf("revocation lookups = %d, want 1", *calls)
 	}
 	if rr.Code != http.StatusOK {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
 }
 
-// TestSessionValidatorErrorSuppressesRenewal: an unverifiable session
-// is not renewed, so an outage cannot extend sessions it can no longer
+// TestRevokedBeforeErrorSuppressesRenewal: an unverifiable session is
+// not renewed, so an outage cannot extend sessions it can no longer
 // check.
-func TestSessionValidatorErrorSuppressesRenewal(t *testing.T) {
-	a, c, advance, _ := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) {
-		return true, errors.New("revocation store down")
+func TestRevokedBeforeErrorSuppressesRenewal(t *testing.T) {
+	a, c, advance, _ := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+		return time.Time{}, errors.New("revocation store down")
 	})
 	advance(31 * time.Minute) // renew window opens at +30m
 
 	rr, _ := serveAuthenticated(a, c, nil)
 	if got := sessionSetCookies(rr, a.sessionName()); len(got) != 0 {
-		t.Errorf("renewed a session the validator could not check: %q", got)
+		t.Errorf("renewed a session the revocation lookup could not check: %q", got)
 	}
 }
 
-// TestSessionValidatorReceivesRequestContext pins that the context
-// handed to the validator is the request's own, so a validator doing
-// I/O can honor cancellation and request-scoped values.
-func TestSessionValidatorReceivesRequestContext(t *testing.T) {
+// TestRevokedBeforeReceivesRequestContext pins that the context handed
+// to the lookup is the request's own, so a lookup doing I/O can honor
+// cancellation and request-scoped values.
+func TestRevokedBeforeReceivesRequestContext(t *testing.T) {
 	type reqKey struct{}
 
 	var gotValue any
 	var gotErr error
-	a, c, _, calls := validatorFixture(t, func(ctx context.Context, _ User, _ time.Time) (bool, error) {
+	a, c, _, calls := revokedBeforeFixture(t, func(ctx context.Context, _ User) (time.Time, error) {
 		gotValue = ctx.Value(reqKey{})
 		gotErr = ctx.Err()
-		return true, nil
+		return time.Time{}, nil
 	})
 
 	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), reqKey{}, "marker"))
-	cancel() // cancellation is observable inside the validator
+	cancel() // cancellation is observable inside the lookup
 	req := httptest.NewRequest(http.MethodGet, "/page", nil).WithContext(ctx)
 	req.AddCookie(c)
 	a.Authenticate(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).
 		ServeHTTP(httptest.NewRecorder(), req)
 
 	if *calls != 1 {
-		t.Fatalf("validator calls = %d, want 1", *calls)
+		t.Fatalf("revocation lookups = %d, want 1", *calls)
 	}
 	if gotValue != "marker" {
 		t.Errorf("ctx value = %v, want %q (not the request's context)", gotValue, "marker")
@@ -1298,33 +1440,33 @@ func TestSessionValidatorReceivesRequestContext(t *testing.T) {
 	}
 }
 
-// TestSessionValidatorErrorRequireAuthNonGET pins that the failure
+// TestRevokedBeforeErrorRequireAuthNonGET pins that the failure
 // outcome is decided before RequireAuth's GET/HEAD split: a POST
 // during an outage must get the same 503, not the 401 an
 // unauthenticated POST earns.
-func TestSessionValidatorErrorRequireAuthNonGET(t *testing.T) {
-	a, c, advance, calls := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) {
-		return false, errors.New("revocation store down")
+func TestRevokedBeforeErrorRequireAuthNonGET(t *testing.T) {
+	a, c, advance, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+		return time.Time{}, errors.New("revocation store down")
 	})
 	advance(5 * time.Minute)
 
 	got := serveRequireAuthMethod(a, c, http.MethodPost)
 	if *calls != 1 {
-		t.Errorf("validator calls = %d, want 1", *calls)
+		t.Errorf("revocation lookups = %d, want 1", *calls)
 	}
 	if got.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want %d", got.Code, http.StatusServiceUnavailable)
 	}
 }
 
-// TestSessionValidatorErrorComposedMiddleware is the realistic
-// production mounting: Authenticate wraps the whole tree and
-// RequireAuth guards a route inside it. The failure has to survive the
-// verify-once context handoff, or the inner RequireAuth falls back to
-// the login redirect this outcome exists to prevent.
-func TestSessionValidatorErrorComposedMiddleware(t *testing.T) {
-	a, c, advance, calls := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) {
-		return false, errors.New("revocation store down")
+// TestRevokedBeforeErrorComposedMiddleware is the realistic production
+// mounting: Authenticate wraps the whole tree and RequireAuth guards a
+// route inside it. The failure has to survive the verify-once context
+// handoff, or the inner RequireAuth falls back to the login redirect
+// this outcome exists to prevent.
+func TestRevokedBeforeErrorComposedMiddleware(t *testing.T) {
+	a, c, advance, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+		return time.Time{}, errors.New("revocation store down")
 	})
 	advance(5 * time.Minute)
 
@@ -1338,9 +1480,9 @@ func TestSessionValidatorErrorComposedMiddleware(t *testing.T) {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusServiceUnavailable)
 	}
 	// The cookie is verified once however the middlewares nest, so the
-	// app's validator is consulted once too.
+	// app's revocation store is consulted once too.
 	if *calls != 1 {
-		t.Errorf("validator calls = %d, want 1", *calls)
+		t.Errorf("revocation lookups = %d, want 1", *calls)
 	}
 }
 
@@ -1349,28 +1491,31 @@ func TestSessionValidatorErrorComposedMiddleware(t *testing.T) {
 // legitimately look anonymous, since only the outage must not redirect
 // to login.
 func TestSessionUnavailableFromContext(t *testing.T) {
+	// The renewalFixture session is minted at 2026-08-21 00:00:00Z, so
+	// this cutoff lands one second after it.
+	revoked := time.Date(2026, 8, 21, 0, 0, 1, 0, time.UTC)
 	cases := []struct {
-		name       string
-		validator  func(context.Context, User, time.Time) (bool, error)
-		withCookie bool
-		want       bool
+		name          string
+		revokedBefore func(context.Context, User) (time.Time, error)
+		withCookie    bool
+		want          bool
 	}{
-		{"validator failed", func(context.Context, User, time.Time) (bool, error) {
-			return false, errors.New("revocation store down")
+		{"revocation lookup failed", func(context.Context, User) (time.Time, error) {
+			return time.Time{}, errors.New("revocation store down")
 		}, true, true},
-		{"validator rejected", func(context.Context, User, time.Time) (bool, error) {
-			return false, nil
+		{"session revoked", func(context.Context, User) (time.Time, error) {
+			return revoked, nil
 		}, true, false},
-		{"valid session", func(context.Context, User, time.Time) (bool, error) {
-			return true, nil
+		{"valid session", func(context.Context, User) (time.Time, error) {
+			return time.Time{}, nil
 		}, true, false},
-		{"anonymous", func(context.Context, User, time.Time) (bool, error) {
-			return true, nil
+		{"anonymous", func(context.Context, User) (time.Time, error) {
+			return time.Time{}, nil
 		}, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			a, c, advance, _ := validatorFixture(t, tc.validator)
+			a, c, advance, _ := revokedBeforeFixture(t, tc.revokedBefore)
 			advance(5 * time.Minute)
 			if !tc.withCookie {
 				c = nil
@@ -1447,24 +1592,24 @@ func captureLogs(t *testing.T, a *Auth) *logCapture {
 	return h
 }
 
-// wantValidatorLog asserts that exactly one session-validator record
+// wantRevocationLog asserts that exactly one revocation-lookup record
 // was logged, at level want.
-func wantValidatorLog(t *testing.T, h *logCapture, want slog.Level) {
+func wantRevocationLog(t *testing.T, h *logCapture, want slog.Level) {
 	t.Helper()
-	got := h.matching("session validator")
+	got := h.matching("revocation lookup")
 	if len(got) != 1 {
-		t.Fatalf("session validator records = %d, want 1: %v", len(got), got)
+		t.Fatalf("revocation lookup records = %d, want 1: %v", len(got), got)
 	}
 	if got[0].Level != want {
 		t.Errorf("logged %q at %v, want %v", got[0].Message, got[0].Level, want)
 	}
 }
 
-// TestValidatorFailureLogsWarn: an ordinary validator error is an
+// TestRevocationFailureLogsWarn: an ordinary lookup error is an
 // outage in a dependency the operator needs to see, so it is warn.
-func TestValidatorFailureLogsWarn(t *testing.T) {
-	a, c, advance, _ := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) {
-		return false, errors.New("revocation store unreachable")
+func TestRevocationFailureLogsWarn(t *testing.T) {
+	a, c, advance, _ := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+		return time.Time{}, errors.New("revocation store unreachable")
 	})
 	h := captureLogs(t, a)
 	advance(5 * time.Minute)
@@ -1472,23 +1617,23 @@ func TestValidatorFailureLogsWarn(t *testing.T) {
 	if got := serveRequireAuth(a, c); got.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", got.Code)
 	}
-	wantValidatorLog(t, h, slog.LevelWarn)
+	wantRevocationLog(t, h, slog.LevelWarn)
 }
 
-// TestValidatorContextErrorOnLiveRequestLogsWarn: a validator that
-// gives its datastore a shorter child timeout, or that wraps a store
-// error satisfying errors.Is(..., context.DeadlineExceeded), reports a
+// TestRevocationContextErrorOnLiveRequestLogsWarn: a lookup that gives
+// its datastore a shorter child timeout, or that wraps a store error
+// satisfying errors.Is(..., context.DeadlineExceeded), reports a
 // dependency outage. The request context is still live, so the level
 // follows it: warn, not debug. Both context errors are wrapped, to pin
 // that the error's identity no longer steers the level.
-func TestValidatorContextErrorOnLiveRequestLogsWarn(t *testing.T) {
+func TestRevocationContextErrorOnLiveRequestLogsWarn(t *testing.T) {
 	for name, cause := range map[string]error{
 		"canceled":          context.Canceled,
 		"deadline exceeded": context.DeadlineExceeded,
 	} {
 		t.Run(name, func(t *testing.T) {
-			a, c, advance, _ := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) {
-				return false, fmt.Errorf("lookup: %w", cause)
+			a, c, advance, _ := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+				return time.Time{}, fmt.Errorf("lookup: %w", cause)
 			})
 			h := captureLogs(t, a)
 			advance(5 * time.Minute)
@@ -1496,17 +1641,17 @@ func TestValidatorContextErrorOnLiveRequestLogsWarn(t *testing.T) {
 			if got := serveRequireAuth(a, c); got.Code != http.StatusServiceUnavailable {
 				t.Fatalf("status = %d, want 503", got.Code)
 			}
-			wantValidatorLog(t, h, slog.LevelWarn)
+			wantRevocationLog(t, h, slog.LevelWarn)
 		})
 	}
 }
 
-// TestValidatorFailureOnCanceledRequestLogsDebug: the client is
-// already gone, so whatever error the validator reports is a
-// consequence of that, not an outage.
-func TestValidatorFailureOnCanceledRequestLogsDebug(t *testing.T) {
-	a, c, advance, calls := validatorFixture(t, func(context.Context, User, time.Time) (bool, error) {
-		return false, errors.New("read tcp: use of closed network connection")
+// TestRevocationFailureOnCanceledRequestLogsDebug: the client is
+// already gone, so whatever error the lookup reports is a consequence
+// of that, not an outage.
+func TestRevocationFailureOnCanceledRequestLogsDebug(t *testing.T) {
+	a, c, advance, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+		return time.Time{}, errors.New("read tcp: use of closed network connection")
 	})
 	h := captureLogs(t, a)
 	advance(5 * time.Minute)
@@ -1521,10 +1666,10 @@ func TestValidatorFailureOnCanceledRequestLogsDebug(t *testing.T) {
 	})).ServeHTTP(rr, req)
 
 	if *calls != 1 {
-		t.Fatalf("validator calls = %d, want 1", *calls)
+		t.Fatalf("revocation lookups = %d, want 1", *calls)
 	}
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rr.Code)
 	}
-	wantValidatorLog(t, h, slog.LevelDebug)
+	wantRevocationLog(t, h, slog.LevelDebug)
 }

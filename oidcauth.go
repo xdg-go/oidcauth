@@ -61,31 +61,27 @@
 //
 // # Revoking sessions
 //
-// [WithSessionValidator] runs an app-supplied check on every verified
-// session. The canonical use is "log out everywhere": store a
-// revocation epoch per user and reject any session whose issue time is
-// strictly before it. Set that epoch to now, never to the current
-// cookie's issue time: a stolen cookie carries the same issue time as
-// the user's own (see "Session lifetime" above), so a strictly-before
-// comparison against it would spare the attacker along with the user.
-// Setting the epoch to now revokes both and forces the user to
-// re-authenticate.
+// [WithRevokedBefore] asks the app, on every verified session, for the
+// instant before which that user's sessions are void; a session issued
+// before it is rejected. To log a user out everywhere, store
+// time.Now() for that user when revoking and return it from the
+// lookup. Store now, never the current cookie's issue time: a stolen
+// cookie carries the same issue time as the user's own (see "Session
+// lifetime" above), so a cutoff there would spare the attacker along
+// with the user. The lookup still runs once per authenticated request,
+// so caching the cutoff is the app's job.
 //
-// The issue time passed to the validator is UTC with whole-second
-// resolution: the mint time truncated to a Unix second. An app
-// comparing it against a full-precision epoch must truncate the epoch
-// the same way -- epoch.Truncate(time.Second) -- or a session minted
-// later in the same second as the epoch appears to precede it and is
-// rejected for no reason. The cost of truncating is that sessions
-// minted earlier in the epoch's own second survive it; the epoch takes
-// full effect from the next second on.
+// Issue time and cutoff are compared in whole seconds, so revocation
+// bites from the next whole second and a session minted later in the
+// cutoff's own second survives. An app that needs it to bite
+// immediately stores time.Now().Truncate(time.Second).Add(time.Second).
 //
-// This package does not recover from a panicking validator. What the
+// This package does not recover from a panicking lookup. What the
 // client sees is whatever the app's own recovery middleware does; with
 // none, net/http's per-connection recovery logs the panic and closes
 // the connection without writing a status, HTTP/2 resets the stream,
 // and a directly invoked handler propagates the panic. Recover inside
-// the validator, or mount recovery middleware.
+// the lookup, or mount recovery middleware.
 //
 // # Cookie secret rotation
 //
@@ -279,7 +275,7 @@ type Auth struct {
 	forceConsentParams map[string]string
 	extraClaims        []string
 
-	sessionValidator func(ctx context.Context, u User, issuedAt time.Time) (bool, error)
+	revokedBefore func(ctx context.Context, u User) (time.Time, error)
 
 	logger *slog.Logger
 
@@ -376,69 +372,47 @@ func WithSessionMaxLifetime(d time.Duration) Option {
 	}
 }
 
-// WithSessionValidator sets an app-supplied check that runs on every
-// session verification, after the cookie's signature, issue time,
-// expiry, and max lifetime have all passed. It has three outcomes:
+// WithRevokedBefore sets an app-supplied lookup of the instant before
+// which this user's sessions are void. It runs on every session
+// verification, after the cookie's signature, issue time, expiry, and
+// max lifetime have all passed, so it must be fast and
+// concurrency-safe.
 //
-//   - (true, nil) accepts the session.
-//   - (false, nil) rejects it exactly as an expired cookie is
-//     rejected: the same response, and no renewed cookie. The client
-//     is told nothing about why, so the validator is free to consult
-//     app state.
-//   - a non-nil error reports failure: the validator could not reach
-//     a verdict. That is an operational failure, not an authorization
-//     decision, so it is not disguised as an expired session.
-//     [Auth.RequireAuth] answers 503. Bare [Auth.Authenticate] treats
-//     the request as anonymous, so a public page does not go down
-//     with the revocation store. Nothing is renewed either way. The
-//     error is logged at warn,
-//     except a failure that is just the caller going away -- a
-//     canceled or timed-out request context -- which is logged at
-//     debug because it is ordinary traffic rather than an outage. Only
-//     the log level distinguishes the two; the outcome is the same.
-//     The error's text is logged verbatim, so put nothing in it you
-//     would not want in logs: a driver error often carries the failed
-//     statement and its parameters, which is to say the user's sub.
+// The returned time has three outcomes. The zero time revokes nothing,
+// so a store miss needs no app-side branch. A non-zero time rejects a
+// session issued before it, exactly as an expired cookie is rejected:
+// same response, and no renewed cookie. A non-nil error reports that
+// the lookup could not answer, which is an operational failure rather
+// than an authorization decision: [Auth.RequireAuth] answers 503, bare
+// [Auth.Authenticate] treats the request as anonymous, and nothing is
+// renewed. A failure is logged at warn, or at debug when the request
+// context is already done, because a client that went away is
+// ordinary traffic.
 //
-// It runs on the request path of every authenticated request, so it
-// must be fast and concurrency-safe. It is not called at all when the
-// cookie is absent, malformed, or fails signature verification.
+// A non-zero time returned alongside a non-nil error is ignored: the
+// error wins, and the lookup counts as a failure.
 //
-// The User passed in is read-only. Its Extra map is the same map the
-// handler later reads from the request context, shared rather than
-// copied, so writing to it corrupts what the handler sees and races
-// other requests. Do not mutate or retain it.
+// A cutoff in the future is treated as now on the instance serving the
+// request, so a misconfigured store cannot revoke the session a fresh
+// login is about to mint and lock the user out there. That clamp is
+// against one server's clock and does not cover skew between
+// instances: a session minted on a slow instance can still be rejected
+// by a faster one until the skew elapses.
 //
-// There is no fail-open/fail-closed option. An app that would rather
-// let requests through during its own outage returns (true, nil) on
-// its internal error; one that would rather shut them out returns the
-// error.
+// Treat the User as read-only. Its Extra map is the same map handlers
+// read from the request context, shared rather than copied, so writing
+// to it races with them.
 //
-// ctx is the request's context, so a validator doing I/O should pass
-// it down and honor cancellation: a client that went away or a server
-// write timeout then cancels the lookup instead of tying up the
-// request.
-//
-// The validator is not consulted at login: a successful callback mints
-// a session cookie without asking. A rule that rejects on identity
-// alone -- this account is disabled, this password changed -- therefore
-// loops: the rejected request redirects to the provider, the provider's
-// own session is still live and bounces straight back, the callback
-// mints a fresh cookie, and the validator rejects it again, until the
-// browser gives up. Judge a session by its issue time instead, as the
-// revocation epoch pattern does (see "Revoking sessions" in the
-// package doc); a freshly minted issuedAt is at or after the epoch, so
-// logging in ends the cycle.
-//
-// issuedAt is in UTC and has whole-second resolution. For the
-// revocation epoch pattern this hook exists for, and the truncation
-// rule that comes with it, see "Revoking sessions" in the package doc.
-func WithSessionValidator(fn func(ctx context.Context, u User, issuedAt time.Time) (bool, error)) Option {
+// ctx is the request's context: a lookup doing I/O should pass it down
+// and honor cancellation. The error's text is logged verbatim, so keep
+// identifiers, SQL, and anything else sensitive out of it. A nil fn is
+// a config error.
+func WithRevokedBefore(fn func(ctx context.Context, u User) (time.Time, error)) Option {
 	return func(a *Auth) error {
 		if fn == nil {
-			return errors.New("oidcauth: session validator must not be nil")
+			return errors.New("oidcauth: revocation lookup must not be nil")
 		}
-		a.sessionValidator = fn
+		a.revokedBefore = fn
 		return nil
 	}
 }
