@@ -389,6 +389,58 @@ a breaking change.
       app's own recovery middleware does and the transport aborts
       absent one. Do not add a recover to the library
 
+### 4.5 Replace the verdict hook with a revocation cutoff
+
+Design review of the shipped 4.3 API (decision log: "Ask the app for a
+revocation cutoff, not a verdict"). The general predicate needed three
+doc paragraphs of rules the API could not enforce; a hook that returns
+the cutoff instead lets the library own the comparison. Land before
+the Phase 5 tag.
+
+- [ ] Add `WithRevokedBefore(fn func(ctx context.Context, u User)
+      (time.Time, error)) Option`; nil fn is a config error. Remove
+      `WithSessionValidator` outright -- nothing is tagged yet
+- [ ] Rename the field and helpers (`sessionValidator`,
+      `validatorFailed`, `errValidatorRejected`, `errValidatorFailed`)
+      to revocation terms; keep `errValidatorFailed`'s non-`errBadCookie`
+      identity and the `SessionUnavailableFromContext` behavior intact
+- [ ] In `verifyOnce`: call the hook after the built-in checks; on
+      error, the existing failed path; otherwise compute
+      `cutoff := min(t, now).Truncate(time.Second)` and reject when
+      `s.IssuedAt < cutoff.Unix()`. Compare in Unix seconds, not
+      `time.Time`, so the truncation rule lives in one line
+- [ ] Zero time revokes nothing: skip the comparison rather than
+      relying on `IssuedAt < 0001-01-01` being false
+- [ ] Clamp a future cutoff to `now` so a misconfigured store cannot
+      reopen the login loop; comment why
+- [ ] **Test**: zero time accepts, and renews normally
+- [ ] **Test**: cutoff == IssuedAt accepts; cutoff == IssuedAt + 1s
+      rejects with the expired-session response and no renewal
+- [ ] **Test**: full-precision cutoff later in the same second as
+      IssuedAt accepts (the truncation rule the app used to own)
+- [ ] **Test**: future cutoff behaves as `now`: a session minted at
+      `now` is accepted
+- [ ] **Test**: loop invariant -- a rejected session followed by a
+      fresh mint at `now` is accepted against the same cutoff
+- [ ] **Test**: error path unchanged: 503 under `RequireAuth`,
+      anonymous under `Authenticate`, no renewal, warn/debug split,
+      `SessionUnavailableFromContext` true
+- [ ] **Test**: hook not called when the cookie is absent, malformed,
+      expired, or past max lifetime
+- [ ] Port every 4.2/4.3 test to the new signature; delete tests that
+      only exercised `(false, nil)`
+- [ ] Rewrite the `WithRevokedBefore` doc: three outcomes on the value
+      type, the clamp, the read-only `User`, ctx cancellation, log
+      hygiene for the error text. Drop the loop paragraph and the
+      truncation paragraph
+- [ ] Rewrite the package doc's "Revoking sessions": store `time.Now()`
+      per user, return it, done. Keep the one-sentence "now, not the
+      cookie's issue time" warning and the panic paragraph. Note the
+      lookup still runs once per authenticated request
+- [ ] README: update the revocation example to the new hook
+- [ ] Update the skeleton's revocation-epoch code to return the stored
+      time instead of comparing it
+
 ---
 
 ## Phase 5: Documentation and Release

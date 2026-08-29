@@ -448,7 +448,7 @@ second the payload is rejected as `errMaxLifetimeReached` rather than
 
 **Partly superseded** -- the signature and the accept/reject-only outcome
 below are out of date; see "Let a session validator report failure, not
-just rejection".
+just rejection", and "Ask the app for a revocation cutoff, not a verdict".
 
 Applications that need to judge a session by more than its signature and
 expiry get `WithSessionValidator(func(User, issuedAt time.Time) bool)`.
@@ -474,6 +474,10 @@ reject decision -- displaying it, say -- since the hook deliberately
 returns only a bool.
 
 ## 2026-08-28 — Let a session validator report failure, not just rejection
+
+**Partly superseded** -- the `(bool, error)` signature is replaced; the
+failure-vs-rejection reasoning stands. See "Ask the app for a
+revocation cutoff, not a verdict".
 
 `WithSessionValidator` now takes `func(ctx context.Context, u User,
 issuedAt time.Time) (bool, error)` rather than the `func(User, issuedAt
@@ -503,3 +507,42 @@ the 503. A library switch would only relocate a choice the validator is
 already holding, and would have to be documented against both outcomes
 above. Revisit only if a third disposition appears that the validator
 cannot express itself.
+
+## 2026-08-28 — Ask the app for a revocation cutoff, not a verdict (supersedes the hook signature above)
+
+`WithSessionValidator(func(ctx, User, issuedAt) (bool, error))` becomes
+`WithRevokedBefore(func(ctx context.Context, u User) (time.Time, error))`.
+The app no longer judges a session; it names the instant before which
+this user's sessions are void, and the library does the comparison. The
+general predicate was never used for anything but the per-user
+revocation epoch, and its generality cost three doc paragraphs of rules
+the API could not enforce: an identity-based rule (account disabled)
+loops through login because the callback mints a fresh cookie without
+consulting the hook; the app must truncate its epoch to whole seconds or
+reject sessions minted later in the epoch's own second; and the
+comparison must be strictly-before against `time.Now()`, never the
+cookie's own issue time. With a cutoff-returning hook every one of those
+moves inside the library. The loop becomes unrepresentable: a fresh
+login mints `issuedAt >= now`, and the library clamps a returned cutoff
+to `now`, so a rejection at t is always followed by acceptance after
+login. Truncation happens once, in the library, against the raw
+`IssuedAt` seconds. The doc shrinks to "store `time.Now()` when
+revoking and return it."
+
+Semantics: `(time.Time{}, nil)` revokes nothing, so a store miss maps to
+accept without an app-side branch; `(t, nil)` rejects a session whose
+issue time is before `min(t, now).Truncate(time.Second)`, with the
+same expired-cookie response and no renewal; a non-nil error is
+unchanged from the entry above -- failure, not rejection, 503 under
+`RequireAuth`, anonymous under bare `Authenticate`, warn/debug log
+split, no fail-open switch. An app wanting fail-open returns the zero
+time from its own error path, which is at least an honest statement
+("I have no cutoff for you") rather than a validator asserting a
+verdict it did not reach. What is lost: any non-time-shaped per-request
+rule, and the app's view of `issuedAt`. The first looped anyway and
+belongs at login; the second was already flagged for a separate
+exposure if a real need appears. The lookup is still one query per
+authenticated request; the getter-shaped signature does not make it
+cheaper, and caching remains the app's job. Revisit if an app needs to
+reject on something a timestamp cannot express and that does not also
+belong at login.
