@@ -36,7 +36,7 @@ type authResult struct {
 	// failed reports that the session validator could not reach a
 	// verdict. It is a third outcome, not a flavor of !ok: an outage
 	// in the app's revocation store is an operational failure, so
-	// [Auth.RequireAuth] answers it with 5xx instead of the redirect
+	// [Auth.RequireAuth] answers it with 503 instead of the redirect
 	// or 401 an expired cookie earns.
 	failed bool
 	// at is the clock reading that verified this request. A later
@@ -159,9 +159,6 @@ func (a *Auth) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		res, r := a.verifyOnce(w, r)
 		if !res.ok {
-			// An inconclusive validator is not an authentication
-			// failure: redirecting to login would send the user
-			// through a loop that cannot succeed, so say so instead.
 			if res.failed {
 				http.Error(w, "session verification unavailable", http.StatusServiceUnavailable)
 				return

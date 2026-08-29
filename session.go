@@ -84,7 +84,7 @@ func (a *Auth) rejectCookie(purpose string, err error) error {
 	return err
 }
 
-// validatorFailed logs an inconclusive session validator and wraps its
+// validatorFailed logs a session validator failure and wraps its
 // error. It is warn, not the debug used for cookie rejections: a
 // rejected cookie is routine traffic, while a validator that cannot
 // answer is an outage in a dependency the operator needs to see.
@@ -95,9 +95,9 @@ func (a *Auth) rejectCookie(purpose string, err error) error {
 // request: ordinary traffic that an authenticated client could
 // otherwise flood the warn level with on purpose. Those drop to debug.
 // An error that merely wraps context.Canceled or DeadlineExceeded
-// while the request is still live is a dependency timeout -- a real
-// outage -- and stays at warn. Only the level changes: the caller
-// still sees errValidatorFailed.
+// while the request is still live is a dependency timeout, not a
+// departed client. That is a real outage, so it stays at warn. Only
+// the level changes: the caller still sees errValidatorFailed.
 func (a *Auth) validatorFailed(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		a.logger.Debug("oidcauth: session validator canceled", "reason", err.Error())

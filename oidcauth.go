@@ -69,7 +69,7 @@
 // the user's own (see "Session lifetime" above), so a strictly-before
 // comparison against it would spare the attacker along with the user.
 // Setting the epoch to now revokes both and forces the user to
-// re-authenticate, which is the point.
+// re-authenticate.
 //
 // The issue time passed to the validator is UTC with whole-second
 // resolution: the mint time truncated to a Unix second. An app
@@ -385,12 +385,13 @@ func WithSessionMaxLifetime(d time.Duration) Option {
 //     rejected: the same response, and no renewed cookie. The client
 //     is told nothing about why, so the validator is free to consult
 //     app state.
-//   - a non-nil error says the validator could not tell. That is an
-//     operational failure, not an authorization decision, so it is not
-//     disguised as an expired session: [Auth.RequireAuth] answers 503,
-//     bare [Auth.Authenticate] treats the request as anonymous so a
-//     public page does not go down with the revocation store, and
-//     nothing is renewed either way. The error is logged at warn,
+//   - a non-nil error reports failure: the validator could not reach
+//     a verdict. That is an operational failure, not an authorization
+//     decision, so it is not disguised as an expired session.
+//     [Auth.RequireAuth] answers 503. Bare [Auth.Authenticate] treats
+//     the request as anonymous, so a public page does not go down
+//     with the revocation store. Nothing is renewed either way. The
+//     error is logged at warn,
 //     except a failure that is just the caller going away -- a
 //     canceled or timed-out request context -- which is logged at
 //     debug because it is ordinary traffic rather than an outage. Only
@@ -398,6 +399,15 @@ func WithSessionMaxLifetime(d time.Duration) Option {
 //     The error's text is logged verbatim, so put nothing in it you
 //     would not want in logs: a driver error often carries the failed
 //     statement and its parameters, which is to say the user's sub.
+//
+// It runs on the request path of every authenticated request, so it
+// must be fast and concurrency-safe. It is not called at all when the
+// cookie is absent, malformed, or fails signature verification.
+//
+// The User passed in is read-only. Its Extra map is the same map the
+// handler later reads from the request context, shared rather than
+// copied, so writing to it corrupts what the handler sees and races
+// other requests. Do not mutate or retain it.
 //
 // There is no fail-open/fail-closed option. An app that would rather
 // let requests through during its own outage returns (true, nil) on
@@ -419,15 +429,6 @@ func WithSessionMaxLifetime(d time.Duration) Option {
 // revocation epoch pattern does (see "Revoking sessions" in the
 // package doc); a freshly minted issuedAt is at or after the epoch, so
 // logging in ends the cycle.
-//
-// It runs on the request path of every authenticated request, so it
-// must be fast and concurrency-safe. It is not called at all when the
-// cookie is absent, malformed, or fails signature verification.
-//
-// The User passed in is read-only. Its Extra map is the same map the
-// handler later reads from the request context, shared rather than
-// copied, so writing to it corrupts what the handler sees and races
-// other requests. Do not mutate or retain it.
 //
 // issuedAt is in UTC and has whole-second resolution. For the
 // revocation epoch pattern this hook exists for, and the truncation
