@@ -1205,24 +1205,166 @@ func TestRevokedBeforeNotCalledOnRejectedSession(t *testing.T) {
 	})
 }
 
-// TestRevokedBeforeFutureCutoffClamped pins the clamp: a store that
-// hands back a cutoff in the future must not revoke a session minted
-// now, or the browser would loop between a fresh login here and a
-// provider whose own session is still live. Unclamped, this cookie's
-// issue time sits an hour below the cutoff and would be refused.
-func TestRevokedBeforeFutureCutoffClamped(t *testing.T) {
+// futureCutoffFixture is revokedBeforeFixture with a lookup that
+// always answers an hour past the mint instant: a value no correct
+// store can produce, since a cutoff records a revocation that already
+// happened.
+func futureCutoffFixture(t *testing.T) (a *Auth, c *http.Cookie, advance func(time.Duration), calls *int) {
+	t.Helper()
 	var cutoff time.Time
-	a, c, _, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+	a, c, advance, calls = revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
 		return cutoff, nil
 	})
 	cutoff = a.now().Add(time.Hour) // the clock has not moved: the cookie was minted at now
+	return a, c, advance, calls
+}
 
-	if _, ok := serveAuthenticated(a, c, nil); !*ok {
-		t.Error("session minted at now was revoked by a future cutoff")
-	}
-	if *calls != 1 {
-		t.Errorf("revocation lookups = %d, want 1", *calls)
-	}
+// TestRevokedBeforeFutureCutoffIsFailure pins that an impossible
+// cutoff is a broken lookup, not a verdict: the same outcomes an error
+// earns. Clamping it to now instead would re-evaluate per request and
+// walk the boundary forward with the clock, so the regression below
+// pins the one-second-after-login case that exposed it.
+func TestRevokedBeforeFutureCutoffIsFailure(t *testing.T) {
+	t.Run("RequireAuth is unavailable", func(t *testing.T) {
+		a, c, advance, calls := futureCutoffFixture(t)
+		advance(5 * time.Minute)
+
+		got := serveRequireAuth(a, c)
+		if *calls != 1 {
+			t.Errorf("revocation lookups = %d, want 1", *calls)
+		}
+		if got.Code != http.StatusServiceUnavailable {
+			t.Errorf("status = %d, want %d", got.Code, http.StatusServiceUnavailable)
+		}
+	})
+
+	t.Run("Authenticate is anonymous", func(t *testing.T) {
+		a, c, advance, _ := futureCutoffFixture(t)
+		advance(5 * time.Minute)
+
+		ran, unavailable := false, false
+		rr, ok := serveAuthenticated(a, c, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ran = true
+			unavailable = SessionUnavailableFromContext(r.Context())
+			w.WriteHeader(http.StatusOK)
+		}))
+		if !ran {
+			t.Fatal("handler did not run")
+		}
+		if *ok {
+			t.Error("request seen as logged in despite an impossible cutoff")
+		}
+		if !unavailable {
+			t.Error("SessionUnavailableFromContext = false, want true")
+		}
+		if rr.Code != http.StatusOK {
+			t.Errorf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+	})
+
+	t.Run("no renewal", func(t *testing.T) {
+		a, c, advance, _ := futureCutoffFixture(t)
+		advance(31 * time.Minute) // renew window opens at +30m
+
+		unavailable := false
+		rr, _ := serveAuthenticated(a, c, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			unavailable = SessionUnavailableFromContext(r.Context())
+		}))
+		if got := sessionSetCookies(rr, a.sessionName()); len(got) != 0 {
+			t.Errorf("renewed a session the revocation lookup could not check: %q", got)
+		}
+		// Without this the test would pass on a plain rejection too,
+		// which renews nothing either.
+		if !unavailable {
+			t.Error("SessionUnavailableFromContext = false, want true")
+		}
+	})
+
+	// The reason has to separate an impossible cutoff from a store
+	// that reported an error, or the operator cannot tell a broken
+	// clock from a broken database.
+	t.Run("logs warn naming the future cutoff", func(t *testing.T) {
+		a, c, advance, _ := futureCutoffFixture(t)
+		h := captureLogs(t, a)
+		advance(5 * time.Minute)
+
+		if got := serveRequireAuth(a, c); got.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503", got.Code)
+		}
+		wantRevocationLog(t, h, slog.LevelWarn)
+		if reason := revocationLogReason(t, h); !strings.Contains(reason, "revocation cutoff is in the future") {
+			t.Errorf("logged reason = %q, want it to name the future cutoff", reason)
+		}
+	})
+
+	// The regression: clamping recomputed min(cutoff, now) on every
+	// request, so a session minted at T passed at T and was refused as
+	// revoked at T+1s. The failure outcome is the whole point here --
+	// what must never come back is the expired-session response, which
+	// is what a rolling boundary produces.
+	t.Run("boundary does not roll forward", func(t *testing.T) {
+		a, c, advance, _ := futureCutoffFixture(t)
+		advance(time.Second) // one second after the login that minted c
+
+		if got := serveRequireAuth(a, c); got.Code != http.StatusServiceUnavailable {
+			t.Errorf("status = %d, want %d", got.Code, http.StatusServiceUnavailable)
+		}
+	})
+}
+
+// TestRevokedBeforeWholeSecondSkewTolerance bounds the cost of the
+// refusal above. The comparison is whole seconds, so a cutoff written
+// by a slightly fast instance is accepted outright as long as it lands
+// in the same second the reader is in. Skew of a full second does
+// fail, and self-heals as soon as the local clock reaches that second.
+func TestRevokedBeforeWholeSecondSkewTolerance(t *testing.T) {
+	t.Run("sub-second skew is tolerated", func(t *testing.T) {
+		var cutoff time.Time
+		a, c, advance, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+			return cutoff, nil
+		})
+		cutoff = a.now().Add(50 * time.Millisecond) // minted here, revoked "before" by a fast instance
+
+		if _, ok := serveAuthenticated(a, c, nil); !*ok {
+			t.Error("session refused over sub-second skew in the cutoff")
+		}
+		// The cutoff truncates back to the same whole second the
+		// session was minted in, so it never revokes it.
+		advance(time.Second)
+		if _, ok := serveAuthenticated(a, c, nil); !*ok {
+			t.Error("session refused a second after a sub-second skewed cutoff")
+		}
+		if *calls != 2 {
+			t.Errorf("revocation lookups = %d, want 2", *calls)
+		}
+	})
+
+	t.Run("a full second ahead fails until the clock catches up", func(t *testing.T) {
+		var cutoff time.Time
+		a, c, advance, _ := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+			return cutoff, nil
+		})
+		cutoff = a.now().Add(time.Second) // the next whole second: still impossible here
+
+		if got := serveRequireAuth(a, c); got.Code != http.StatusServiceUnavailable {
+			t.Errorf("status = %d, want %d while the cutoff is a second ahead", got.Code, http.StatusServiceUnavailable)
+		}
+
+		// Once the clock reaches the cutoff it is an ordinary
+		// verdict: the older session is revoked, and a login at this
+		// instant ends the loop.
+		advance(time.Second)
+		if _, ok := serveAuthenticated(a, c, nil); *ok {
+			t.Error("session issued before the cutoff was accepted once the clock caught up")
+		}
+
+		rr := httptest.NewRecorder()
+		a.setSessionCookie(rr, User{Sub: "s1"})
+		fresh := recordedCookie(t, rr, a.sessionName())
+		if _, ok := serveAuthenticated(a, fresh, nil); !*ok {
+			t.Error("session minted at the cutoff was revoked: login loops")
+		}
+	})
 }
 
 // TestRevokedBeforeReloginEndsLoop pins the invariant the whole design
@@ -1230,39 +1372,28 @@ func TestRevokedBeforeFutureCutoffClamped(t *testing.T) {
 // it. The same lookup answers both requests, so a cutoff that could
 // outlive a fresh mint would show up here as a second rejection.
 func TestRevokedBeforeReloginEndsLoop(t *testing.T) {
-	cases := []struct {
-		name        string
-		cutoffAfter time.Duration // cutoff relative to the re-login instant
-	}{
-		{"cutoff is now", 0},
-		{"cutoff in the future", time.Hour}, // clamped back to now
+	var cutoff time.Time
+	a, old, advance, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
+		return cutoff, nil
+	})
+	advance(5 * time.Minute)
+	cutoff = a.now()
+
+	if _, ok := serveAuthenticated(a, old, nil); *ok {
+		t.Fatal("session issued before the cutoff was accepted")
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var cutoff time.Time
-			a, old, advance, calls := revokedBeforeFixture(t, func(context.Context, User) (time.Time, error) {
-				return cutoff, nil
-			})
-			advance(5 * time.Minute)
-			cutoff = a.now().Add(tc.cutoffAfter)
 
-			if _, ok := serveAuthenticated(a, old, nil); *ok {
-				t.Fatal("session issued before the cutoff was accepted")
-			}
+	// The login handler mints a new cookie at the same instant the
+	// cutoff was read from.
+	rr := httptest.NewRecorder()
+	a.setSessionCookie(rr, User{Sub: "s1"})
+	fresh := recordedCookie(t, rr, a.sessionName())
 
-			// The login handler mints a new cookie at the same instant
-			// the cutoff was read from.
-			rr := httptest.NewRecorder()
-			a.setSessionCookie(rr, User{Sub: "s1"})
-			fresh := recordedCookie(t, rr, a.sessionName())
-
-			if _, ok := serveAuthenticated(a, fresh, nil); !*ok {
-				t.Error("session minted after the cutoff was revoked: login loops")
-			}
-			if *calls != 2 {
-				t.Errorf("revocation lookups = %d, want 2", *calls)
-			}
-		})
+	if _, ok := serveAuthenticated(a, fresh, nil); !*ok {
+		t.Error("session minted after the cutoff was revoked: login loops")
+	}
+	if *calls != 2 {
+		t.Errorf("revocation lookups = %d, want 2", *calls)
 	}
 }
 
@@ -1603,6 +1734,29 @@ func wantRevocationLog(t *testing.T, h *logCapture, want slog.Level) {
 	if got[0].Level != want {
 		t.Errorf("logged %q at %v, want %v", got[0].Message, got[0].Level, want)
 	}
+}
+
+// revocationLogReason returns the reason attribute of the single
+// revocation-lookup record, so a test can pin which failure was
+// reported and not merely that one was.
+func revocationLogReason(t *testing.T, h *logCapture) string {
+	t.Helper()
+	got := h.matching("revocation lookup")
+	if len(got) != 1 {
+		t.Fatalf("revocation lookup records = %d, want 1: %v", len(got), got)
+	}
+	reason := ""
+	got[0].Attrs(func(attr slog.Attr) bool {
+		if attr.Key == "reason" {
+			reason = attr.Value.String()
+			return false
+		}
+		return true
+	})
+	if reason == "" {
+		t.Fatalf("no reason attribute on %q", got[0].Message)
+	}
+	return reason
 }
 
 // TestRevocationFailureLogsWarn: an ordinary lookup error is an

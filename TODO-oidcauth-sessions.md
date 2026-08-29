@@ -411,15 +411,17 @@ the Phase 5 tag.
       `time.Time`, so the truncation rule lives in one line
 - [x] Zero time revokes nothing: skip the comparison rather than
       relying on `IssuedAt < 0001-01-01` being false
-- [x] Clamp a future cutoff to `now` so a misconfigured store cannot
-      reopen the login loop; comment why
+- [x] Treat a future cutoff as a lookup failure (clamping was tried
+      first and rolled the boundary forward every request; see decision
+      log)
 - [x] **Test**: zero time accepts, and renews normally
 - [x] **Test**: cutoff == IssuedAt accepts; cutoff == IssuedAt + 1s
       rejects with the expired-session response and no renewal
 - [x] **Test**: full-precision cutoff later in the same second as
       IssuedAt accepts (the truncation rule the app used to own)
-- [x] **Test**: future cutoff behaves as `now`: a session minted at
-      `now` is accepted
+- [x] **Test**: future cutoff takes the failure path, and the boundary
+      does not roll forward: a session minted at `now` is not logged
+      out a second later
 - [x] **Test**: loop invariant -- a rejected session followed by a
       fresh mint at `now` is accepted against the same cutoff
 - [x] **Test**: error path unchanged: 503 under `RequireAuth`,

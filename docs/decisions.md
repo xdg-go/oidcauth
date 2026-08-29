@@ -510,6 +510,10 @@ cannot express itself.
 
 ## 2026-08-28 — Ask the app for a revocation cutoff, not a verdict (supersedes the hook signature above)
 
+**Partly superseded** -- the clamp of a future cutoff to `now` is
+replaced by refusing the value; everything else stands. See "Refuse a
+future revocation cutoff instead of clamping it".
+
 `WithSessionValidator(func(ctx, User, issuedAt) (bool, error))` becomes
 `WithRevokedBefore(func(ctx context.Context, u User) (time.Time, error))`.
 The app no longer judges a session; it names the instant before which
@@ -546,3 +550,43 @@ authenticated request; the getter-shaped signature does not make it
 cheaper, and caching remains the app's job. Revisit if an app needs to
 reject on something a timestamp cannot express and that does not also
 belong at login.
+
+## 2026-08-28 — Refuse a future revocation cutoff instead of clamping it (supersedes the clamp above)
+
+The entry above made a future cutoff harmless by clamping it: the
+library compared `s.IssuedAt` against `min(t, now).Truncate(time.Second)`
+in `sessionFromRequestAt`. External review found the bug. The clamp
+recomputes on every request, so a store that persistently answers a
+future instant (a fat-fingered 2030, a badly skewed writer) walks the
+boundary forward with the clock: a session minted at T passes at T,
+because the cutoff clamps to T, and is revoked at T+1s, because the
+cutoff now clamps to T+1s. That is a rolling logout one second after
+every login -- precisely the loop the clamp was written to prevent, and
+silent, since the user sees the ordinary expired-session response.
+
+Three options. Compare the cutoff literally: correct in the sense that
+the library honors what the store said, but a store stuck at 2030 locks
+the user out permanently and just as silently. Add a skew tolerance and
+clamp inside it: the tolerance is a number nobody can justify, and it
+keeps the rolling boundary for anything past it. Treat a future cutoff
+as a failed lookup: chosen. A cutoff records a revocation that already
+happened, so a value ahead of the server's clock is impossible and can
+only mean a misconfigured store or clock skew. `sessionFromRequestAt`
+now routes it through `revocationFailed` with its own reason text
+("revocation cutoff is in the future", plus the cutoff, the gap, and
+now), inheriting the error path's outcomes: 503 under `RequireAuth`,
+anonymous under bare `Authenticate`, no renewal,
+`SessionUnavailableFromContext` true, warn unless the request context
+is already done.
+
+The consequence is deliberate: a broken store now produces a visible,
+noisy failure for the affected users instead of a quiet logout loop.
+The check compares whole seconds (`cutoff.Unix() > now.Unix()`),
+matching the `s.IssuedAt` comparison it guards, so ordinary sub-second
+skew costs nothing at all. The brief failure above is the cost only of
+skew of a second or more, bounded by the skew and self-healing the
+moment the local clock reaches that second -- pinned by
+`TestRevokedBeforeWholeSecondSkewTolerance`. Revisit if operators report
+skew large enough to make that window user-visible; the answer then is
+NTP or a store that writes the cutoff from one clock, not a tolerance
+in this library.

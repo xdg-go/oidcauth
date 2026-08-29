@@ -87,7 +87,9 @@ func (a *Auth) rejectCookie(purpose string, err error) error {
 // revocationFailed logs a revocation-lookup failure and wraps its
 // error. It is warn, not the debug used for cookie rejections: a
 // rejected cookie is routine traffic, while a lookup that cannot
-// answer is an outage in a dependency the operator needs to see.
+// answer is an outage in a dependency the operator needs to see. A
+// cutoff the lookup returns from the future comes here too, carrying
+// its own reason: an impossible value is a broken lookup.
 //
 // The level follows the request context's state, not the error's
 // identity. When ctx is already done the client has gone away, so a
@@ -323,22 +325,28 @@ func (a *Auth) sessionFromRequestAt(r *http.Request, now time.Time) (sessionPayl
 	// an expired session.
 	if a.revokedBefore != nil {
 		ctx := r.Context()
-		t, err := a.revokedBefore(ctx, s.User)
+		cutoff, err := a.revokedBefore(ctx, s.User)
 		if err != nil {
 			return sessionPayload{}, a.revocationFailed(ctx, err)
 		}
 		// A store with no entry for this user says so by returning
 		// the zero time, which revokes nothing.
-		if !t.IsZero() {
-			// A cutoff in the future would revoke the session a fresh
-			// login mints as well, looping the browser between this
-			// package and a provider whose own session is still live.
-			// Clamping to now makes that unrepresentable. The clamp is
-			// against this server's clock only; see
-			// [WithRevokedBefore] for what that leaves uncovered.
-			cutoff := t
-			if cutoff.After(now) {
-				cutoff = now
+		if !cutoff.IsZero() {
+			// A cutoff later than this server's clock is
+			// impossible, so it is a failed lookup rather than a
+			// verdict. Clamping it to now re-evaluates per request,
+			// rolling the boundary forward one second after every
+			// login; comparing it literally is a permanent, silent
+			// lockout. Failing makes a broken store visible. See the
+			// decision log.
+			//
+			// The check is whole seconds, like the IssuedAt
+			// comparison below, so sub-second skew between the
+			// store's clock and this one is tolerated.
+			if cutoff.Unix() > now.Unix() {
+				return sessionPayload{}, a.revocationFailed(ctx, fmt.Errorf(
+					"revocation cutoff is in the future: cutoff %s is %s ahead of now %s",
+					cutoff.UTC().Format(time.RFC3339Nano), cutoff.Sub(now), now.UTC().Format(time.RFC3339Nano)))
 			}
 			// IssuedAt is whole seconds, and Unix() truncates the
 			// cutoff the same way. Without that, a cutoff set partway

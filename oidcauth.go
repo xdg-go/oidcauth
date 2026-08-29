@@ -392,13 +392,15 @@ func WithSessionMaxLifetime(d time.Duration) Option {
 // A non-zero time returned alongside a non-nil error is ignored: the
 // error wins, and the lookup counts as a failure.
 //
-// A cutoff in the future is clamped to now on the instance serving
-// the request. A misconfigured store therefore cannot revoke the
-// session a fresh login is about to mint, which would lock the user
-// out of that instance. The clamp is against one server's clock, so
-// it says nothing about skew between instances: a session minted on a
-// slow instance can still be rejected by a faster one until the skew
-// elapses.
+// The comparison is in whole seconds, so a cutoff in the same second
+// as the serving instance's clock is honored and ordinary sub-second
+// skew between instances costs nothing. A cutoff landing in a later
+// second than that clock is treated as a lookup failure, with the same
+// outcomes as an error above. Such a value can only come from a
+// misconfigured store or from clock skew between instances, and
+// honoring it would revoke the session a fresh login is about to mint.
+// A brief, visible failure beats the silent rolling logout that
+// clamping the cutoff to now would produce.
 //
 // There is no fail-open switch. An app that would rather let requests
 // through during its own store outage returns the zero time from its

@@ -142,7 +142,11 @@ auth, err := oidcauth.NewFromEnv(
 ```
 
 Store the revocation instant, never the current cookie's issue time: a
-stolen cookie carries the same issue time as the user's own. For the
+stolen cookie carries the same issue time as the user's own. Take that
+instant from the clock the app serves requests on (the process's
+`time.Now()`), not from the database's `NOW()`: a cutoff that lands in
+a later second than the server's clock is treated as a lookup failure.
+For the
 reasoning, see
 [Revoking sessions](https://pkg.go.dev/github.com/xdg-go/oidcauth#hdr-Revoking_sessions).
 
