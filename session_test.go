@@ -795,3 +795,63 @@ func TestNewRejectsBadPreviousCookieSecret(t *testing.T) {
 		})
 	}
 }
+
+// TestCookieRejectionLogsWithoutSecrets pins what a rejection logs: the
+// failure class at debug level, and nothing drawn from the cookie
+// itself. A reason that echoed the value or the user would put session
+// material in the operator's logs.
+func TestCookieRejectionLogsWithoutSecrets(t *testing.T) {
+	a := cookieAuth(testCookieKey)
+	h := captureLogs(t, a)
+
+	rr := httptest.NewRecorder()
+	a.setSessionCookie(rr, User{Sub: "s1", Email: "secret@example.com"})
+	c := recordedCookie(t, rr, a.sessionName())
+	tampered := *c
+	tampered.Value = "A" + c.Value[1:]
+
+	if _, err := a.sessionFromRequestAt(requestWithCookie(&tampered), a.now()); err == nil {
+		t.Fatal("tampered cookie accepted")
+	}
+
+	got := h.matching("cookie rejected")
+	if len(got) != 1 {
+		t.Fatalf("cookie rejected records = %d, want 1: %v", len(got), got)
+	}
+	if got[0].Level != slog.LevelDebug {
+		t.Errorf("logged at %v, want %v", got[0].Level, slog.LevelDebug)
+	}
+
+	attrs := map[string]string{}
+	got[0].Attrs(func(attr slog.Attr) bool {
+		attrs[attr.Key] = attr.Value.String()
+		return true
+	})
+	if attrs["cookie"] != purposeSession {
+		t.Errorf("cookie attr = %q, want %q", attrs["cookie"], purposeSession)
+	}
+	if attrs["reason"] != errBadSignature.Error() {
+		t.Errorf("reason attr = %q, want %q", attrs["reason"], errBadSignature.Error())
+	}
+	for _, secret := range []string{tampered.Value, "secret@example.com", testCookieKey} {
+		for key, val := range attrs {
+			if strings.Contains(val, secret) {
+				t.Errorf("attr %s leaks %q", key, secret)
+			}
+		}
+	}
+}
+
+func TestSetCookieName(t *testing.T) {
+	for value, want := range map[string]string{
+		"_oidcauth=abc; Path=/; HttpOnly": "_oidcauth",
+		" _oidcauth =abc":                 "_oidcauth",
+		"_oidcauth=":                      "_oidcauth",
+		"":                                "",
+		"novalue; Path=/":                 "",
+	} {
+		if got := setCookieName(value); got != want {
+			t.Errorf("setCookieName(%q) = %q, want %q", value, got, want)
+		}
+	}
+}
