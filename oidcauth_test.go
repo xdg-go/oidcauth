@@ -370,8 +370,9 @@ func TestNewValidatesSessionLifetimes(t *testing.T) {
 }
 
 // TestNewIsOffline proves construction needs no network: with an
-// unreachable issuer, New succeeds and the discovery-free surface —
-// session read via User, session clear via ClearSession — works.
+// unreachable issuer, New succeeds and the discovery-free surface
+// (session read via sessionFromRequestAt, session clear via
+// ClearSession) works.
 func TestNewIsOffline(t *testing.T) {
 	a, err := New(Config{
 		Issuer: "https://unreachable.invalid", ClientID: "app", ClientSecret: "s",

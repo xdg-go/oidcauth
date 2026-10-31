@@ -16,11 +16,12 @@
 // email beside the pair for display and recovery; let it suggest a
 // link only when the user proves it, e.g. by a verification challenge.
 //
-// sub is opaque and stable only within an issuer. Replacing the issuer
-// implementation, or how it authenticates upstream, can change every
-// sub behind an unchanged URL. Before such a migration, store a durable
-// upstream identity (via [WithExtraClaims]) or accept email as the
-// mapping key under the rule above.
+// That permanence holds only while the issuer stays the same
+// implementation. Replacing the implementation, or changing how it
+// authenticates upstream, can change every sub behind an unchanged
+// URL. Before such a migration, store a durable upstream identity (via
+// [WithExtraClaims]) or accept email as the mapping key under the rule
+// above.
 //
 // # Middleware
 //
@@ -32,7 +33,9 @@
 //
 // Only Authenticate renews. Mount at least one in the user's normal
 // browsing path, or sessions expire a full lifetime after login no
-// matter how active the user is.
+// matter how active the user is. Nesting cannot turn renewal off: the
+// strongest mount covering a route decides, and a response never
+// carries two session cookies.
 //
 // One *Auth per process; see [UserFromContext].
 //
@@ -78,9 +81,14 @@
 // verified session without a write gets private; anonymous responses
 // are untouched. All three get Vary: Cookie.
 //
-// The headers are set before your handler runs, and your handler can overwrite
-// them. If you set Cache-Control on a route that can carry a session, set
-// "private, no-store".
+// The headers are set before your handler runs, and your handler can
+// overwrite them. If you set Cache-Control on a route that can carry a
+// session, set "private, no-store".
+//
+// Before writing the session cookie the package drops any queued
+// Set-Cookie of the same name, so the last writer wins. Matching
+// ignores Path and Domain; a handler clearing a legacy Domain= copy of
+// the same name in the same response loses that write.
 //
 // # Issuer availability
 //
@@ -148,8 +156,8 @@ type Config struct {
 //	AUTH_ISSUER, AUTH_CLIENT_ID, AUTH_CLIENT_SECRET,
 //	AUTH_REDIRECT_URL, AUTH_COOKIE_SECRET
 //
-//	AUTH_COOKIE_SECRET_PREVIOUS is optional: a comma-separated list of
-//	retired secrets that still verify cookies.
+// AUTH_COOKIE_SECRET_PREVIOUS is optional: a comma-separated list of
+// retired secrets that still verify cookies.
 //
 // It returns an error naming every missing variable.
 func FromEnv() (Config, error) {
@@ -288,9 +296,9 @@ func WithSessionLifetime(d time.Duration) Option {
 // an arriving request triggers renewal (default 45 days). While a
 // request lands outside the window [Auth.Authenticate] leaves the
 // cookie alone; the first request inside it re-issues the cookie with
-// a fresh lifetime. At the defaults renewal fires 45 days after the cookie was
-// written. Setting the window equal to the session lifetime renews on every
-// request.
+// a fresh lifetime. At the defaults renewal fires 45 days after the
+// cookie was written. Setting the window equal to the session lifetime
+// renews on every request.
 //
 // Must be a whole number of seconds of at least 1s and must not
 // exceed the session lifetime.
@@ -306,12 +314,12 @@ func WithSessionRenewWindow(d time.Duration) Option {
 
 // WithSessionMaxLifetime sets how long a session may live from the
 // original login (default 365 days). This deadline never moves:
-// renewal preserves the original issue time. The deadline is computed from the
-// issue time stored in each cookie, so lowering it applies to sessions already
-// minted.
+// renewal preserves the original issue time. The deadline is computed
+// from the issue time stored in each cookie, so lowering it applies to
+// sessions already minted.
 //
-// Must be a whole number of seconds of at least 1s and must not be shorter than
-// the session lifetime.
+// Must be a whole number of seconds of at least 1s and must not be
+// shorter than the session lifetime.
 func WithSessionMaxLifetime(d time.Duration) Option {
 	return func(a *Auth) error {
 		if err := checkSessionDuration("session max lifetime", d); err != nil {
@@ -322,23 +330,26 @@ func WithSessionMaxLifetime(d time.Duration) Option {
 	}
 }
 
-// WithRevokedBefore sets an app-supplied lookup of a revocation cutoff. Cookied
-// issued before the cutoff are treated as expired. It runs on every session
-// verification, after the cookie's signature, issue time, expiry, and
-// max lifetime have all passed, so it must be fast and concurrency-safe.
-// The comparison is in whole seconds, with the returned cutoff rounded down.
+// WithRevokedBefore sets an app-supplied lookup of a revocation
+// cutoff. Cookies issued before the cutoff are treated as expired. It
+// runs on every session verification, after the cookie's signature,
+// issue time, expiry, and max lifetime have all passed, so it must be
+// fast and concurrency-safe. The comparison is in whole seconds, with
+// the returned cutoff rounded down.
 //
-// A non-nil error indictes that the lookup was unsuccessful. Authentication
-// middleware treats it as an operational failure, not an authorization
-// decision: [Auth.RequireAuth] answers 503, bare [Auth.Authenticate] treats the
-// request as anonymous, and nothing is renewed. An error's text is logged
-// verbatim, so keep identifiers and anything else sensitive out of it.
-// A cutoff in the future is treated like an unsuccessful lookup.
+// A non-nil error indicates that the lookup was unsuccessful.
+// Authentication middleware treats it as an operational failure, not
+// an authorization decision: [Auth.RequireAuth] answers 503, bare
+// [Auth.Authenticate] treats the request as anonymous, and nothing is
+// renewed. An error's text is logged verbatim, so keep identifiers and
+// anything else sensitive out of it. A cutoff in the future is treated
+// like an unsuccessful lookup.
 //
-// A nil fn is a config error. Treat the User as read-only. Its Extra map is the
-// same map handlers read from the request context, shared rather than copied,
-// so writing to it races with them. ctx is the request's context: a lookup
-// doing I/O should pass it down and honor cancellation.
+// A nil fn is a config error. Treat the User as read-only. Its Extra
+// map is the same map handlers read from the request context, shared
+// rather than copied, so writing to it races with them. ctx is the
+// request's context: a lookup doing I/O should pass it down and honor
+// cancellation.
 func WithRevokedBefore(fn func(ctx context.Context, u User) (time.Time, error)) Option {
 	return func(a *Auth) error {
 		if fn == nil {
@@ -349,9 +360,10 @@ func WithRevokedBefore(fn func(ctx context.Context, u User) (time.Time, error)) 
 	}
 }
 
-// WithLogger sets the logger used for diagnostic messages, such as
-// the reason a session cookie was rejected (logged at debug level).
-// The default discards all output. A nil logger is a config error.
+// WithLogger sets the logger used for diagnostic messages. Cookie
+// rejections log at debug. A failed revocation lookup logs at warn, or
+// at debug when the request's context is already done. The default
+// discards all output. A nil logger is a config error.
 func WithLogger(l *slog.Logger) Option {
 	return func(a *Auth) error {
 		if l == nil {
@@ -431,8 +443,9 @@ func WithPostLogoutRedirect(p string) Option {
 // unfamiliar user, so each user sees an explicit consent screen
 // exactly once per app. iss is the verified issuer of the ID token —
 // constant per [Auth], but passed so known can be a store method
-// keyed on the (iss, sub) account pair. known must be fast and
-// non-blocking (e.g. a map or indexed DB lookup). The restart happens
+// keyed on the (iss, sub) account pair. known runs on the callback
+// request without a context, so it must be fast (e.g. a map or an
+// indexed DB lookup). The restart happens
 // at most once per login attempt. The parameters sent on the restart
 // are issuer-neutral by default; see [WithForceConsentParams].
 func ForceApprovalIfNewUser(known func(iss, sub string) bool) Option {
@@ -600,11 +613,8 @@ func (a *Auth) Connect(ctx context.Context) error {
 // attempt, and for discoveryCooldown after a failure callers get that
 // error without a new attempt.
 func (a *Auth) ensureDiscovered(ctx context.Context) error {
-	// The flight intentionally ignores the caller's ctx: its result
-	// serves every waiter (ctx bounds only this caller's wait, in the
-	// select below), and it is time-bounded by the internal client's
-	// timeout, not by cancellation. DoChan's channel is buffered, so
-	// abandoning it leaks nothing.
+	// DoChan's channel is buffered, so abandoning it on ctx.Done leaks
+	// nothing.
 	ch := a.sf.DoChan("discover", func() (any, error) { //nolint:contextcheck,gosec // G118: detached by design; see above
 		return nil, a.discover()
 	})
@@ -616,9 +626,10 @@ func (a *Auth) ensureDiscovered(ctx context.Context) error {
 	}
 }
 
-// discover runs one discovery attempt and records the outcome, unless prior
-// attempts take precedence: prior success shortcircuits, and a recent, prior
-// failure inside the cooldown window is returned without a new attempt.
+// discover runs one discovery attempt and records the outcome, unless
+// prior attempts take precedence: prior success short-circuits, and a
+// recent, prior failure inside the cooldown window is returned without
+// a new attempt.
 //
 // Invariant: verifier (with oauth.Endpoint) is write-once — set by
 // whichever attempt first succeeds, immutable after. Both the check

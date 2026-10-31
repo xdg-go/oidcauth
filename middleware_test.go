@@ -707,10 +707,10 @@ func TestCallbackInRenewWindowEmitsOneCookie(t *testing.T) {
 	}
 }
 
-// TestNoRenewOuterStillRenewsInner pins the mount-order fix: wrapping
-// a renewing Authenticate in an AuthenticateNoRenew must not disable
-// renewal for the inner routes. The strongest mount owns the renewal
-// decision, not the outermost one.
+// TestNoRenewOuterStillRenewsInner pins that wrapping a renewing
+// Authenticate in an AuthenticateNoRenew must not disable renewal for
+// the inner routes. The strongest mount owns the renewal decision, not
+// the outermost one.
 func TestNoRenewOuterStillRenewsInner(t *testing.T) {
 	a, c, advance := renewalFixture(t)
 	before := decodeSession(t, a, c)
@@ -741,7 +741,7 @@ func TestNoRenewOuterStillRenewsInner(t *testing.T) {
 	}
 }
 
-// TestRequireAuthOuterStillRenewsInner is the same fix on
+// TestRequireAuthOuterStillRenewsInner is the same rule on
 // RequireAuth's inline verify path: its sentinel comes from a
 // non-renewing verification, so an inner Authenticate must still renew.
 func TestRequireAuthOuterStillRenewsInner(t *testing.T) {
@@ -1397,7 +1397,7 @@ func TestRevokedBeforeReloginEndsLoop(t *testing.T) {
 	}
 }
 
-// TestRevokedBeforeCutoffBoundary pins the comparison the library now
+// TestRevokedBeforeCutoffBoundary pins the comparison the library
 // owns, at the one-second granularity IssuedAt is stored in. A cutoff
 // equal to a live session's issue time leaves it alone -- which is why
 // "log out everywhere" must store now, not the current cookie's issue

@@ -59,7 +59,7 @@ type authResult struct {
 // session inside its renew window gets a renewed Set-Cookie, written
 // before next runs so it cannot lose a race with the handler's own
 // headers. Cache headers are written at entry as well. The lifetime
-// and caching rules -- the two clocks, the max-lifetime cap, which
+// and caching rules -- the two deadlines, the max-lifetime cap, which
 // Cache-Control each response gets, and the handler that overwrites it
 // -- are in the package doc under "Session lifetime" and "Caching".
 func (a *Auth) Authenticate(next http.Handler) http.Handler {
@@ -91,9 +91,6 @@ func (a *Auth) authenticate(next http.Handler, renew bool) http.Handler {
 		// long as no mount has made that decision yet. So: one
 		// verification, at most one session Set-Cookie.
 		if renew && res.ok && !res.renewed {
-			// Renewal happens before the handler runs, so the
-			// Set-Cookie cannot lose a race with headers the handler
-			// writes.
 			a.renewSessionCookie(w, res.session, res.at)
 			res.renewed = true
 			r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, res))
@@ -104,9 +101,9 @@ func (a *Auth) authenticate(next http.Handler, renew bool) http.Handler {
 
 // verifyOnce returns this request's session, verifying the cookie only
 // if no mount of this Auth already did: however the middlewares nest,
-// a request is verified exactly once. It returns the request to pass down: a fresh
-// verify carries the sentinel on the context, a reused one is
-// unchanged.
+// a request is verified exactly once. It returns the request to pass
+// down: a fresh verify carries the sentinel on the context, a reused
+// one is unchanged.
 //
 // A fresh verify is also the only place the response's cache headers
 // are written, which is what keeps their ordering from mattering. They
@@ -120,9 +117,6 @@ func (a *Auth) verifyOnce(w http.ResponseWriter, r *http.Request) (authResult, *
 		return res, r
 	}
 	varyOnCookie(w)
-	// One clock reading covers verification and any renewal decision
-	// made from it, so a request cannot straddle the moment a session
-	// expires.
 	now := a.now()
 	s, err := a.sessionFromRequestAt(r, now)
 	res := authResult{owner: a, session: s, ok: err == nil, failed: errors.Is(err, errRevocationFailed), at: now}
@@ -141,8 +135,8 @@ func (a *Auth) verifyOnce(w http.ResponseWriter, r *http.Request) (authResult, *
 // RequireAuth wraps next so it only runs with a valid app session.
 // The verified [User] is placed in the request context for
 // [UserFromContext]. Unauthenticated GET/HEAD requests are redirected
-// to the login handler with `next` set to the requested path; other
-// methods get 401. A revocation lookup that reports failure rather
+// to the login handler with `next` set to the requested path and
+// query; other methods get 401. A revocation lookup that reports failure rather
 // than a cutoff (see [WithRevokedBefore]) gets 503: an outage is
 // not an authentication failure, and a login redirect could not fix
 // it.

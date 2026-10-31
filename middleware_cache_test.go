@@ -246,9 +246,9 @@ func TestLoginRedirectIsUncacheable(t *testing.T) {
 // TestNoRenewInsideRenewingKeepsNoStore pins the reverse nesting:
 // the outer renewing mount writes the cookie and "private, no-store",
 // then the inner non-renewing mount hits the sentinel and must not
-// downgrade the header back to "private".
-// TestNoRenewInsideRenewingStillOneCookie covers the same nesting but
-// only counts Set-Cookie, so it cannot see the downgrade.
+// downgrade the header back to "private". Its sibling
+// TestNoRenewInsideRenewingStillOneCookie only counts Set-Cookie, so
+// it cannot see the downgrade.
 func TestNoRenewInsideRenewingKeepsNoStore(t *testing.T) {
 	a, c, advance := renewalFixture(t)
 	advance(31 * time.Minute) // inside the renew window: the outer mount renews

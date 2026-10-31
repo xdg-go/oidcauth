@@ -39,13 +39,13 @@ const (
 )
 
 // errBadCookie reports that a signed cookie was absent, malformed,
-// tampered with, or expired. Every rejection reason below wraps it, so
-// the package presents one external failure while logs name the
-// specific cause. It stays unexported until an exported API returns it.
+// tampered with, expired, or revoked. Every rejection reason below
+// wraps it, so the package presents one external failure while logs
+// name the specific cause. It stays unexported until an exported API
+// returns it.
 var errBadCookie = errors.New("oidcauth: invalid or expired cookie")
 
-// Rejection reasons. Each wraps errBadCookie so that external
-// behavior is one error, while logs can name what actually failed.
+// Rejection reasons; each wraps errBadCookie.
 var (
 	errNoCookie           = fmt.Errorf("%w: no cookie present", errBadCookie)
 	errBadSignature       = fmt.Errorf("%w: bad signature", errBadCookie)
@@ -85,8 +85,9 @@ func (a *Auth) rejectCookie(purpose string, err error) error {
 }
 
 // revocationFailed logs a revocation-lookup failure and wraps its
-// error. Logging normally happens at the warn level. If ctx is
-// canceled or expired, this function logs at debug level instead.
+// error. It logs at warn, or at debug when ctx is already canceled or
+// expired: the request ending explains the failure, so it is not
+// evidence of a revocation-store outage.
 func (a *Auth) revocationFailed(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		a.logger.Debug("oidcauth: revocation lookup canceled", "reason", err.Error())
@@ -144,6 +145,7 @@ func (a *Auth) verify(purpose, value string) ([]byte, error) {
 	if err != nil {
 		return nil, errMalformedPayload
 	}
+	// No early exit: timing must not reveal which ring key matched.
 	matched := 0
 	for _, key := range a.verifyKeys {
 		mac := hmac.New(sha256.New, key)
@@ -198,7 +200,7 @@ func (a *Auth) writeSessionCookie(w http.ResponseWriter, u User, issuedAt int64,
 	markSessionResponse(w)
 	payload, _ := json.Marshal(sessionPayload{User: u, Expiry: exp, IssuedAt: issuedAt})
 	a.dropPendingSessionCookie(w)
-	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for http://localhost dev)
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for an http:// redirect URL)
 		Name:     a.sessionName(),
 		Value:    a.sign(purposeSession, payload),
 		Path:     "/",
@@ -249,7 +251,7 @@ func setCookieName(value string) string {
 func (a *Auth) clearSessionCookie(w http.ResponseWriter) {
 	markSessionResponse(w)
 	a.dropPendingSessionCookie(w)
-	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for http://localhost dev)
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for an http:// redirect URL)
 		Name:     a.sessionName(),
 		Value:    "",
 		Path:     "/",
@@ -261,12 +263,13 @@ func (a *Auth) clearSessionCookie(w http.ResponseWriter) {
 }
 
 // sessionFromRequestAt returns the whole verified payload from the
-// request's session cookie, or an error if the cookie is absent,
-// tampered, expired, or past the max lifetime. The current time is
-// supplied by the caller, so a caller that also has to decide about
-// renewal reads the clock exactly once for the whole request. Every
-// rejection reason lives here, so renewal can never act on a session
-// the verify path would refuse.
+// request's session cookie. It returns an errBadCookie reason if the
+// cookie is absent, tampered, expired, past the max lifetime, or
+// revoked, and errRevocationFailed if the app's lookup could not
+// answer. The current time is supplied by the caller, so a caller
+// that also has to decide about renewal reads the clock exactly once
+// for the whole request. Every rejection reason lives here, so renewal
+// can never act on a session the verify path would refuse.
 func (a *Auth) sessionFromRequestAt(r *http.Request, now time.Time) (sessionPayload, error) {
 	c, err := r.Cookie(a.sessionName())
 	if err != nil {
@@ -324,8 +327,9 @@ func (a *Auth) sessionFromRequestAt(r *http.Request, now time.Time) (sessionPayl
 			// verdict. Clamping it to now re-evaluates per request,
 			// rolling the boundary forward one second after every
 			// login; comparing it literally is a permanent, silent
-			// lockout. Failing makes a broken store visible. See the
-			// decision log.
+			// lockout. Failing makes a broken store visible. See
+			// docs/decisions.md, "Refuse a future revocation cutoff
+			// instead of clamping it".
 			//
 			// The check is whole seconds, like the IssuedAt
 			// comparison below, so sub-second skew between the
@@ -390,7 +394,7 @@ func (a *Auth) setStateCookie(w http.ResponseWriter, s statePayload) {
 	markSessionResponse(w)
 	s.Expiry = a.now().Add(stateTTL)
 	payload, _ := json.Marshal(s)
-	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for http://localhost dev)
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for an http:// redirect URL)
 		Name:     a.stateCookieName(),
 		Value:    a.sign(purposeState, payload),
 		Path:     "/",
@@ -403,7 +407,7 @@ func (a *Auth) setStateCookie(w http.ResponseWriter, s statePayload) {
 
 func (a *Auth) clearStateCookie(w http.ResponseWriter) {
 	markSessionResponse(w)
-	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for http://localhost dev)
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- HttpOnly+SameSite always set; Secure follows the redirect-URL scheme (off only for an http:// redirect URL)
 		Name:     a.stateCookieName(),
 		Value:    "",
 		Path:     "/",
