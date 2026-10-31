@@ -590,3 +590,31 @@ moment the local clock reaches that second -- pinned by
 skew large enough to make that window user-visible; the answer then is
 NTP or a store that writes the cutoff from one clock, not a tolerance
 in this library.
+
+## 2026-10-31 — Reject cross-origin logout with `http.CrossOriginProtection`
+
+`LogoutHandler`'s comment claimed POST-only plus a `SameSite=Lax`
+cookie was a complete CSRF defense. It is not. Lax only withholds the
+cookie from the cross-site POST, and logout needs no cookie: it clears
+unconditionally, and under rfc6265bis §5.7 browsers apply a
+`Set-Cookie` -- deletion included -- on the response to a top-level
+cross-site POST navigation. Any page could log the user out with an
+auto-submitting form. The handler now also runs
+`http.NewCrossOriginProtection().Check` (stdlib since Go 1.25; go.mod
+is 1.26) and answers 403 on failure, after the existing 405 for
+non-POST. That check trusts `Sec-Fetch-Site`, falls back to comparing
+`Origin` with `r.Host`, and passes requests carrying neither, i.e.
+non-browser clients, which are not a CSRF vector. POST-only stays, now
+justified only by prefetchers, scanners, and prerendering.
+
+Softening the comment and accepting logout CSRF was rejected: the fix
+is a few lines of stdlib with no configuration, and any page forcing a
+logout on every visit is a real denial of service. A hand-rolled
+`Sec-Fetch-Site`/`Origin` check was unnecessary given the Go version.
+Comparing `Origin` against the redirect URL's origin instead of
+`r.Host` was also rejected for now: it only matters for browsers too
+old to send `Sec-Fetch-Site` sitting behind a proxy that rewrites
+`Host`, and it would couple logout to `RedirectURL`. Consequences: a
+`same-site` sibling subdomain cannot post to logout either. Revisit
+(via `AddTrustedOrigin`) if an app needs cross-origin logout from a
+trusted origin, or reports 403s from Host-rewriting proxies.

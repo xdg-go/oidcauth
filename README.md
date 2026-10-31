@@ -76,7 +76,7 @@ including the nOAuth attack class and issuer-migration caveats, is in
 
 ### Log out
 
-Logout is POST-only, so drive it from a form, not a link:
+Logout accepts only same-origin POSTs, so drive it from a form on your own site, not a link:
 
 ```html
 <form method="post" action="/auth/logout"><button>Log out</button></form>

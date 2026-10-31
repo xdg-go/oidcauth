@@ -197,19 +197,24 @@ func (a *Auth) CallbackHandler() http.Handler {
 // ends the app's session: the issuer's own session and any upstream
 // (e.g. Google) consent are unaffected.
 //
-// Logout is POST-only, for two reasons. CSRF: with SameSite=Lax,
-// cross-site subresources (<img>, script) never carry the session
-// cookie, but top-level GET navigation does — so a GET logout is
-// forceable by any cross-site link, while Lax withholds cookies from
-// cross-site POSTs, making POST + Lax a complete defense with no CSRF
-// token. Accidents: link prefetchers, browser prerendering, and email
-// scanners issue GETs and would randomly end sessions; nothing
-// prefetches a form. Log out from a form (or fetch) that issues a
-// POST.
+// It answers 405 to anything but POST: link prefetchers, browser
+// prerendering, and email scanners issue GETs and would randomly end
+// sessions; nothing prefetches a form. POST alone is no CSRF defense:
+// logout needs no cookie on the request, and browsers apply the
+// clearing Set-Cookie on the response to a cross-site form POST. So it
+// also answers 403 to cross-origin requests, as judged by
+// [http.CrossOriginProtection] (Sec-Fetch-Site, else Origin vs. Host);
+// requests with neither header come from non-browser clients and pass.
+// Log out from a same-origin form (or fetch) that issues a POST.
 func (a *Auth) LogoutHandler() http.Handler {
+	sameOrigin := http.NewCrossOriginProtection()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := sameOrigin.Check(r); err != nil {
+			http.Error(w, "cross-origin logout rejected", http.StatusForbidden)
 			return
 		}
 		a.clearSessionCookie(w)

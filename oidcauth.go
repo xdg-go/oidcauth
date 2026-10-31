@@ -92,9 +92,10 @@
 //
 // # Logout
 //
-// [Auth.LogoutHandler] is POST-only and clears only the app cookie; the
-// issuer's session is untouched. [Auth.ClearSession] does the same from
-// inside your own handler.
+// [Auth.LogoutHandler] accepts only same-origin POSTs (405 for other
+// methods, 403 cross-origin) and clears only the app cookie; the
+// issuer's session is untouched. [Auth.ClearSession] does the same
+// from inside your own handler.
 package oidcauth
 
 import (

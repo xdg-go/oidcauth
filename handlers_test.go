@@ -491,8 +491,55 @@ func TestLogoutClearsSession(t *testing.T) {
 	}
 }
 
-// TestLogoutRejectsGET pins logout as POST-only: a GET-triggered logout
-// is CSRF-able, so it must not clear the session.
+// TestLogoutOriginCheck pins the CSRF defense: a cross-site form POST
+// gets the clearing Set-Cookie applied, so cross-origin logouts must
+// be refused before the cookie is cleared. httptest requests carry
+// Host example.com.
+func TestLogoutOriginCheck(t *testing.T) {
+	idp := newFakeIDP(t)
+	a := newTestAuth(t, idp)
+
+	cases := map[string]struct {
+		secFetchSite string
+		origin       string
+		wantCode     int
+	}{
+		"same-origin":          {"same-origin", "http://example.com", http.StatusFound},
+		"origin only, matches": {"", "http://example.com", http.StatusFound},
+		"no headers":           {"", "", http.StatusFound},
+		"cross-site":           {"cross-site", "https://evil.test", http.StatusForbidden},
+		"same-site subdomain":  {"same-site", "http://sub.example.com", http.StatusForbidden},
+		"origin mismatch":      {"", "https://evil.test", http.StatusForbidden},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+			if tc.secFetchSite != "" {
+				req.Header.Set("Sec-Fetch-Site", tc.secFetchSite)
+			}
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			rr := httptest.NewRecorder()
+			a.LogoutHandler().ServeHTTP(rr, req)
+			if rr.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d", rr.Code, tc.wantCode)
+			}
+			cleared := false
+			for _, c := range rr.Result().Cookies() {
+				if c.Name == a.sessionName() && c.MaxAge < 0 {
+					cleared = true
+				}
+			}
+			if wantCleared := tc.wantCode == http.StatusFound; cleared != wantCleared {
+				t.Errorf("cookie cleared = %v, want %v", cleared, wantCleared)
+			}
+		})
+	}
+}
+
+// TestLogoutRejectsGET pins logout as POST-only: prefetchers, scanners,
+// and prerendering issue GETs, which must not clear the session.
 func TestLogoutRejectsGET(t *testing.T) {
 	idp := newFakeIDP(t)
 	a := newTestAuth(t, idp)
